@@ -1,6 +1,7 @@
 imputation_comparisons/
 # virtual environment
 fedgen_env/
+fedamd/
 
 data/EMnist/data
 data/EMnist/u20-letters-alpha0.1-ratio0.1
