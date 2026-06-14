@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
     # Sweep size
     p.add_argument("--quick", action="store_true",
                    help="Tiny smoke-run (5 rounds, 1 alpha, 2 missing rates).")
+    p.add_argument("--budget", choices=["full", "fast", "minimal"], default="full",
+                   help="Pre-canned time budgets. "
+                        "'full'    = paper grid, ~24-72h GPU-h (default). "
+                        "'fast'    = times=1, 50 rounds, full grid, ~10-12h. "
+                        "'minimal' = times=1, 50 rounds, 1 alpha, 2 miss-rates, ~4-6h.")
     p.add_argument("--num_glob_iters", type=int, default=100,
                    help="Federated rounds per cell (paper uses 100).")
     p.add_argument("--local_epochs", type=int, default=20)
@@ -83,6 +88,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--times", type=int, default=3,
                    help="Random seeds (>=3 for paper-quality means/stds).")
     p.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+
+    # Stage-1 grid trimming (passthrough to run_paper_pipeline.py)
+    p.add_argument("--datasets", nargs="*",
+                   default=["Mnist", "EMnist"],
+                   help="Stage-1 datasets (default: Mnist EMnist).")
+    p.add_argument("--alphas", nargs="*", type=float,
+                   default=[0.1, 1.0, 10.0],
+                   help="Stage-1 Dirichlet alphas (default: 0.1 1.0 10.0).")
+    p.add_argument("--missing_rates", nargs="*", type=float,
+                   default=[0.0, 0.1, 0.2],
+                   help="Stage-1 missing rates (default: 0.0 0.1 0.2).")
+    p.add_argument("--algorithms", nargs="*",
+                   default=ALGOS,
+                   help=f"FL algorithms to run in every stage (default: {ALGOS}).")
 
     # Phase toggles
     p.add_argument("--skip_baseline", action="store_true",
@@ -140,17 +159,17 @@ def common_orchestrator_args(args, missing_pattern: str = "random"):
 
 
 def phase_baseline_sweep(args) -> None:
-    """MNIST + EMNIST x alpha={0.1,1,10} x missing={0,0.1,0.2} -- the bulk of the paper."""
+    """MNIST + EMNIST x alpha x missing -- the bulk of the paper grid."""
     if args.skip_baseline:
         print("[skip] --skip_baseline given")
         return
     banner("STAGE 1  MNIST/EMNIST sweep (Tables 2-3) + 0% baseline column")
     cmd = [
         PY, "run_paper_pipeline.py",
-        "--datasets", "Mnist", "EMnist",
-        "--alphas", "0.1", "1.0", "10.0",
-        "--missing_rates", "0.0", "0.1", "0.2",
-        "--algorithms", *ALGOS,
+        "--datasets", *args.datasets,
+        "--alphas", *[str(a) for a in args.alphas],
+        "--missing_rates", *[str(m) for m in args.missing_rates],
+        "--algorithms", *args.algorithms,
         *common_orchestrator_args(args, missing_pattern="random"),
     ]
     run(cmd, args.dry_run)
@@ -183,7 +202,7 @@ def phase_pamap2(args) -> None:
         "--include_pamap2",
         "--alphas", *[str(a) for a in args.pamap2_alphas],
         "--missing_rates", *[str(m) for m in args.pamap2_missing_rates],
-        "--algorithms", *ALGOS,
+        "--algorithms", *args.algorithms,
         *common_orchestrator_args(args, missing_pattern="random"),
     ]
     run(cmd, args.dry_run)
@@ -285,8 +304,41 @@ def final_checklist(args) -> None:
 
 
 # ------------------------------------------------------------------ main
+def apply_budget(args: argparse.Namespace) -> None:
+    """Pre-canned wall-clock budgets that compress the sweep without losing
+    paper-relevant cells (only seeds and round-count are reduced)."""
+    if args.budget == "full":
+        return
+    if args.budget == "fast":
+        # ~10-12 GPU-h: full grid, 1 seed, half rounds.
+        if args.times == 3:           # only override defaults
+            args.times = 1
+        if args.num_glob_iters == 100:
+            args.num_glob_iters = 50
+        print("[budget=fast] times=1, num_glob_iters=50, full grid kept")
+    elif args.budget == "minimal":
+        # ~4-6 GPU-h: 1 seed, 50 rounds, 1 alpha (1.0), 2 missing-rates (0.1, 0.2).
+        if args.times == 3:
+            args.times = 1
+        if args.num_glob_iters == 100:
+            args.num_glob_iters = 50
+        if args.alphas == [0.1, 1.0, 10.0]:
+            args.alphas = [1.0]
+        if args.missing_rates == [0.0, 0.1, 0.2]:
+            args.missing_rates = [0.1, 0.2]
+        if args.pamap2_alphas == [0.1, 1.0]:
+            args.pamap2_alphas = [1.0]
+        if args.pamap2_missing_rates == [0.1, 0.2]:
+            args.pamap2_missing_rates = [0.1]
+        if args.har_patterns == ["random", "mar", "mnar"]:
+            args.har_patterns = ["random"]
+        print("[budget=minimal] times=1, num_glob_iters=50, alphas=[1.0], "
+              "missing_rates=[0.1,0.2], HAR patterns=[random], PAMAP2 trimmed")
+
+
 def main() -> None:
     args = parse_args()
+    apply_budget(args)
 
     # Sanity: orchestrator + scripts exist
     for must_exist in [
