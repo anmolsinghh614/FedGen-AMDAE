@@ -25,6 +25,19 @@ def load_results(args, algorithm, seed=0):
         print(f"Warning: Could not load results for {algorithm}: {e}")
         return None
 
+
+def load_curves(args, algorithm, seed=0):
+    """Return (glob_acc, glob_loss) for one algorithm/seed. Either may be None."""
+    try:
+        alg = get_log_path(args, algorithm, seed, args.gen_batch_size)
+        with h5py.File(f"./{args.result_path}/{alg}.h5", 'r') as hf:
+            acc = np.array(hf['glob_acc'][:]) if 'glob_acc' in hf else None
+            loss = np.array(hf['glob_loss'][:]) if 'glob_loss' in hf else None
+        return acc, loss
+    except Exception as e:
+        print(f"Warning: Could not load curves for {algorithm}: {e}")
+        return None, None
+
 def main(args):
     algorithms = [a.strip() for a in args.algorithms.split(',')]
     assert len(algorithms) > 0, "No algorithms provided"
@@ -133,6 +146,82 @@ def main(args):
     print(f"\nSaved summary table to: {table_path}")
     print(f"Saved performance graph to: {fig_path}")
 
+def plot_acc_loss_side_by_side(args):
+    """Reproduces paper Fig. 13: test accuracy + training loss side-by-side."""
+    algorithms = [a.strip() for a in args.algorithms.split(',')]
+    parts = args.dataset.split('-')
+    dataset_name = parts[0]
+    alpha_str = parts[1].replace('alpha', '') if len(parts) > 1 else 'default'
+    out_dir = 'results/experiment_summary'
+    os.makedirs(out_dir, exist_ok=True)
+
+    colors = {
+        'FedGen': '#1f77b4', 'FedAvg': '#ff7f0e', 'FedProx': '#2ca02c',
+        'Ensemble': '#9467bd', 'FedDistill': '#d62728',
+    }
+
+    fig, (ax_acc, ax_loss) = plt.subplots(1, 2, figsize=(14, 5))
+    plotted = 0
+    for algorithm in algorithms:
+        label = get_label_name(algorithm)
+        accs, losses = [], []
+        for seed in range(args.times):
+            a, l = load_curves(args, algorithm, seed)
+            if a is not None:
+                accs.append(a)
+            if l is not None:
+                losses.append(l)
+        if not accs and not losses:
+            continue
+
+        if accs:
+            min_len_a = min(len(c) for c in accs)
+            stacked = np.stack([c[:min_len_a] for c in accs], axis=0)
+            mean_a = stacked.mean(axis=0)
+            std_a = stacked.std(axis=0)
+            x = np.arange(min_len_a)
+            ax_acc.plot(x, mean_a, color=colors.get(label, 'black'),
+                        label=label, linewidth=2)
+            ax_acc.fill_between(x, mean_a - std_a, mean_a + std_a,
+                                color=colors.get(label, 'black'), alpha=0.15)
+
+        if losses:
+            min_len_l = min(len(c) for c in losses)
+            stacked = np.stack([c[:min_len_l] for c in losses], axis=0)
+            mean_l = stacked.mean(axis=0)
+            std_l = stacked.std(axis=0)
+            x = np.arange(min_len_l)
+            ax_loss.plot(x, mean_l, color=colors.get(label, 'black'),
+                         label=label, linewidth=2)
+            ax_loss.fill_between(x, mean_l - std_l, mean_l + std_l,
+                                 color=colors.get(label, 'black'), alpha=0.15)
+        plotted += 1
+
+    ax_acc.set_title("Test Accuracy")
+    ax_acc.set_xlabel("Communication Rounds")
+    ax_acc.set_ylabel("Accuracy")
+    ax_acc.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
+    ax_acc.grid(True)
+    ax_acc.legend(loc="lower right")
+
+    ax_loss.set_title("Training Loss")
+    ax_loss.set_xlabel("Communication Rounds")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.grid(True)
+    ax_loss.legend(loc="upper right")
+
+    miss_pct = int(args.missing_rate * 100)
+    fig.suptitle(f"{dataset_name} (alpha={alpha_str}, {miss_pct}% Missing)")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    out_path = os.path.join(
+        out_dir,
+        f"acc_loss_{dataset_name}_alpha{alpha_str}_miss{args.missing_rate}.png")
+    fig.savefig(out_path, bbox_inches='tight', dpi=300)
+    plt.close(fig)
+    print(f"Saved acc/loss panel to: {out_path}  (algorithms plotted: {plotted})")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True)
@@ -147,5 +236,9 @@ if __name__ == "__main__":
     parser.add_argument("--embedding", type=int, default=0)
     parser.add_argument("--gen_batch_size", type=int, default=64)
     parser.add_argument("--num_glob_iters", type=int, default=100)
+    parser.add_argument("--plot_loss", action="store_true",
+                        help="Also produce a paper Fig.13-style side-by-side accuracy + loss subplot.")
     args = parser.parse_args()
     main(args)
+    if args.plot_loss:
+        plot_acc_loss_side_by_side(args)

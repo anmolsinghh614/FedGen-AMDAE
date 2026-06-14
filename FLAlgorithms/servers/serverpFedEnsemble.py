@@ -13,7 +13,11 @@ class FedEnsemble(Server):
 
         # Initialize data for all users
         data = read_data(args.dataset)
-        data = apply_amdae_imputation(data, missing_rate=args.missing_rate)
+        data = apply_amdae_imputation(
+            data,
+            missing_rate=args.missing_rate,
+            missing_pattern=getattr(args, 'missing_pattern', 'random'),
+        )
         # data contains: clients, groups, train_data, test_data, proxy_data
         clients = data[0]
         total_users = len(clients)

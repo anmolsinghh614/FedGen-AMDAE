@@ -74,25 +74,115 @@ class AMDAE(nn.Module):
 
 
 class MissingDataSimulator:
-    def __init__(self, missing_patterns=['random', 'fixed_intervals', 'continuous_periods']):
-        self.missing_patterns = missing_patterns
-    
-    def introduce_missing_data(self, data: np.ndarray, missing_rate: float = 0.1, 
-                             pattern: str = 'random', **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        if pattern == 'random':
+    """
+    Generates the binary mask M used by the imputers.
+
+    Patterns
+    --------
+    - 'random'   / 'mcar'   : each entry is masked iid with probability r.
+    - 'mar'                  : missingness depends on an *observed* covariate
+                                (here: the row label, when provided). Rows with
+                                certain label values are made more missing-prone.
+                                The aggregate per-cell missing rate is still r.
+    - 'mnar'                 : missingness depends on the *value itself*
+                                (high-magnitude entries are more likely to be
+                                masked, mimicking sensor saturation). The
+                                aggregate per-cell missing rate is still r.
+    - 'fixed_intervals'      : block missingness over rows.
+    - 'continuous_periods'   : long contiguous gaps within a column.
+
+    For backward compatibility, the legacy aliases continue to work:
+       'mcar' is an alias of 'random'.
+    """
+    def __init__(self, missing_patterns=None):
+        self.missing_patterns = missing_patterns or [
+            'random', 'mcar', 'mar', 'mnar',
+            'fixed_intervals', 'continuous_periods',
+        ]
+
+    def introduce_missing_data(self, data: np.ndarray, missing_rate: float = 0.1,
+                             pattern: str = 'random', labels: np.ndarray = None,
+                             **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        pat = (pattern or 'random').lower()
+        if pat in ('random', 'mcar'):
             return self._random_missing(data, missing_rate)
-        elif pattern == 'fixed_intervals':
+        elif pat == 'mar':
+            return self._mar_missing(data, missing_rate, labels=labels, **kwargs)
+        elif pat == 'mnar':
+            return self._mnar_missing(data, missing_rate, **kwargs)
+        elif pat == 'fixed_intervals':
             return self._fixed_intervals_missing(data, missing_rate, **kwargs)
-        elif pattern == 'continuous_periods':
+        elif pat == 'continuous_periods':
             return self._continuous_periods_missing(data, missing_rate, **kwargs)
         else:
             raise ValueError(f"Unknown missing pattern: {pattern}")
-    
+
     def _random_missing(self, data: np.ndarray, missing_rate: float) -> Tuple[np.ndarray, np.ndarray]:
         corrupted_data = data.copy()
         missing_mask = np.random.random(data.shape) < missing_rate
         corrupted_data[missing_mask] = np.nan
         return corrupted_data, missing_mask.astype(int)
+
+    def _mar_missing(self, data: np.ndarray, missing_rate: float,
+                     labels: np.ndarray = None,
+                     skew: float = 3.0, **_kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Missing-At-Random: per-row masking probability scales with row label.
+        Rows with high label-id are `skew`x more likely to be missing than
+        rows with low label-id, but the *aggregate* per-cell missing rate
+        across the whole matrix is still ~missing_rate. If labels are not
+        supplied, fall back to a deterministic row-index-based proxy.
+        """
+        N, D = data.shape
+        if labels is None or len(labels) != N:
+            row_signal = np.linspace(0.0, 1.0, N)
+        else:
+            lab = np.asarray(labels).astype(float).reshape(-1)
+            lo, hi = float(lab.min()), float(lab.max())
+            row_signal = (lab - lo) / (hi - lo + 1e-12)
+
+        # row-wise probability mass: linearly mix [1, skew]
+        row_weight = 1.0 + (skew - 1.0) * row_signal
+        per_row_p = row_weight / row_weight.mean() * missing_rate
+        per_row_p = np.clip(per_row_p, 0.0, 1.0)
+
+        u = np.random.random((N, D))
+        missing_mask = u < per_row_p[:, None]
+        corrupted = data.copy()
+        corrupted[missing_mask] = np.nan
+        return corrupted, missing_mask.astype(int)
+
+    def _mnar_missing(self, data: np.ndarray, missing_rate: float,
+                      skew: float = 3.0, **_kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Missing-Not-At-Random: high-magnitude entries (per column) are more
+        likely to be masked, simulating sensor saturation / clipping. The
+        aggregate per-cell missing rate is still ~missing_rate.
+        """
+        N, D = data.shape
+        finite = np.isfinite(data)
+        cell_signal = np.zeros_like(data, dtype=float)
+        for j in range(D):
+            col = data[:, j]
+            mask_finite = finite[:, j]
+            if mask_finite.sum() == 0:
+                continue
+            mu = float(np.mean(col[mask_finite]))
+            sd = float(np.std(col[mask_finite])) + 1e-12
+            z = np.abs((col - mu) / sd)
+            z[~mask_finite] = 0.0
+            # squash into [0,1] via tanh; high |z| -> closer to 1
+            cell_signal[:, j] = np.tanh(z)
+
+        cell_weight = 1.0 + (skew - 1.0) * cell_signal
+        cell_p = cell_weight / cell_weight.mean() * missing_rate
+        cell_p = np.clip(cell_p, 0.0, 1.0)
+
+        u = np.random.random(data.shape)
+        missing_mask = u < cell_p
+        corrupted = data.copy()
+        corrupted[missing_mask] = np.nan
+        return corrupted, missing_mask.astype(int)
     
     def _fixed_intervals_missing(self, data: np.ndarray, missing_rate: float, 
                                interval_size: int = 2) -> Tuple[np.ndarray, np.ndarray]:
@@ -288,11 +378,13 @@ class AMDAEImputer(BaseImputer):
 
 def process_federated_data_for_imputation(data: Tuple) -> Dict[str, Any]:
     clients, groups, train_data, test_data, proxy_data = data
-    
+
     all_train_data = []
+    all_train_labels = []
     all_test_data = []
+    all_test_labels = []
     client_indices = []
-    
+
     for i, client in enumerate(clients):
         if client in train_data:
             client_train = np.array(train_data[client]['x'])
@@ -300,25 +392,43 @@ def process_federated_data_for_imputation(data: Tuple) -> Dict[str, Any]:
                 client_train = client_train.reshape(client_train.shape[0], -1)
             all_train_data.append(client_train)
             client_indices.extend([i] * len(client_train))
-        
+            if 'y' in train_data[client]:
+                all_train_labels.append(np.asarray(train_data[client]['y']).reshape(-1))
+
         if client in test_data:
             client_test = np.array(test_data[client]['x'])
             if len(client_test.shape) > 2:
                 client_test = client_test.reshape(client_test.shape[0], -1)
             all_test_data.append(client_test)
-    
+            if 'y' in test_data[client]:
+                all_test_labels.append(np.asarray(test_data[client]['y']).reshape(-1))
+
     combined_train = np.vstack(all_train_data) if all_train_data else np.array([])
     combined_test = np.vstack(all_test_data) if all_test_data else np.array([])
     combined_data = np.vstack([combined_train, combined_test]) if len(combined_train) > 0 and len(combined_test) > 0 else combined_train
-    
+
+    if all_train_labels:
+        combined_train_labels = np.concatenate(all_train_labels)
+    else:
+        combined_train_labels = np.array([])
+    if all_test_labels:
+        combined_test_labels = np.concatenate(all_test_labels)
+    else:
+        combined_test_labels = np.array([])
+    if len(combined_train_labels) and len(combined_test_labels):
+        combined_labels = np.concatenate([combined_train_labels, combined_test_labels])
+    else:
+        combined_labels = combined_train_labels
+
     processed_data = {
         'combined_data': combined_data,
+        'combined_labels': combined_labels,
         'train_data': combined_train,
         'test_data': combined_test,
         'client_indices': np.array(client_indices),
         'original_shapes': [np.array(train_data[client]['x']).shape for client in clients if client in train_data]
     }
-    
+
     return processed_data
 
 
@@ -572,19 +682,24 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
         return data
     
     processed_data = process_federated_data_for_imputation(data)
-    
+
     if len(processed_data['combined_data']) == 0:
         print("No data to process")
         return data
-    
+
     original_complete = processed_data['combined_data'].copy()
-    
+
     simulator = MissingDataSimulator()
+    sim_kwargs = dict(kwargs)
+    if missing_pattern.lower() == 'mar' and 'labels' not in sim_kwargs:
+        labels_full = processed_data.get('combined_labels')
+        if labels_full is not None and len(labels_full) == len(processed_data['combined_data']):
+            sim_kwargs['labels'] = labels_full
     data_with_missing, missing_mask = simulator.introduce_missing_data(
-        processed_data['combined_data'], 
-        missing_rate, 
-        missing_pattern, 
-        **kwargs
+        processed_data['combined_data'],
+        missing_rate,
+        missing_pattern,
+        **sim_kwargs,
     )
     
     input_dim = data_with_missing.shape[1]

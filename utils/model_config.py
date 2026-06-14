@@ -11,6 +11,7 @@ CONFIGS_ = {
     'mnist_cnn2': ([16, 'M', 32, 'M', 'F'], 1, 10, 128, 32),
     'celeb': ([16, 'M', 32, 'M', 64, 'M', 'F'], 3, 2, 64, 32),
     'ucihar': ([6, 16, 'F'], 1, 6, 576, 32),  # 1-ch 24x24, Conv->12x12->6x6, flat=576
+    'pamap2': ([6, 16, 'F'], 1, 12, 64, 32),  # 1-ch 8x8 (51 IMU + 13 zero pad), Conv->4x4->2x2, flat=16*2*2=64
 }
 
 # temporary roundabout to evaluate sensitivity of the generator
@@ -29,6 +30,7 @@ GENERATORCONFIGS = {
     'emnist-cnn2': (128, 32, 1, 26, 16),
     'emnist-cnn3': (64, 32, 1, 26, 32),
     'ucihar': (256, 32, 1, 6, 32),
+    'pamap2': (256, 32, 1, 12, 32),
 }
 
 
@@ -86,6 +88,20 @@ RUNCONFIGS = {
             'ensemble_alpha': 1,    # teacher loss (server side)
             'ensemble_beta': 0,     # adversarial student loss
             'unique_labels': 6,     # 6 activity classes
+            'generative_alpha': 10,
+            'generative_beta': 1,
+            'weight_decay': 1e-2
+        },
+
+    'pamap2':
+        {
+            'ensemble_lr': 1e-4,
+            'ensemble_batch_size': 128,
+            'ensemble_epochs': 50,
+            'num_pretrain_iters': 20,
+            'ensemble_alpha': 1,    # teacher loss (server side)
+            'ensemble_beta': 0,     # adversarial student loss
+            'unique_labels': 12,    # 12 PAMAP2 activity classes
             'generative_alpha': 10,
             'generative_beta': 1,
             'weight_decay': 1e-2

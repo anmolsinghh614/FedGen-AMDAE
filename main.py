@@ -66,6 +66,11 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda", choices=["cpu","cuda"], help="run device (cpu | cuda)")
     parser.add_argument("--result_path", type=str, default="results/models", help="directory path to save results")
     parser.add_argument("--missing_rate", type=float, default=0.1, help="Missing data ratio for AMDAE imputation (0.0-1.0)")
+    parser.add_argument("--missing_pattern", type=str, default="random",
+                        choices=["random", "mcar", "mar", "mnar", "fixed_intervals", "continuous_periods"],
+                        help="Missing-data mechanism used by MissingDataSimulator: "
+                             "random/mcar (default, paper Eq.1), mar (label-conditional), "
+                             "mnar (magnitude-conditional), fixed_intervals, continuous_periods.")
 
     args = parser.parse_args()
     """

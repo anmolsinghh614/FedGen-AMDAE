@@ -20,13 +20,11 @@ a SECOND validation on a real-sensor dataset. This script wraps:
 
 Notes
 -----
-- UCI HAR is already supported end-to-end by this repo.
-- PAMAP2 is NOT yet supported by the model code itself
-  (utils/model_utils.py + utils/model_config.py would need a
-  'pamap2' branch). Adding that support is out of scope here, but
-  this script ships the dataset preparation step so you can plug it
-  in. It will warn loudly when --dataset_kind pamap2 is chosen
-  without those code-side hooks.
+- UCI HAR is supported end-to-end by this repo.
+- PAMAP2 is also supported end-to-end: model wiring lives in
+  utils/model_utils.py (get_data_dir / get_dataset_name) and
+  utils/model_config.py (CONFIGS_ / GENERATORCONFIGS / RUNCONFIGS).
+  Use --prepare_only to download / convert / split without training.
 
 Examples
 --------
@@ -316,46 +314,12 @@ def prepare_pamap2(args: argparse.Namespace) -> str:
             print(f"  wrote {out_path}  (#users={args.n_user}, "
                   f"total={sum(dataset['num_samples'])})")
 
-    print(textwrap.dedent("""
-    --------------------------------------------------------------------
-    PAMAP2 wiring hint (one-time code change, NOT done by this script):
-    --------------------------------------------------------------------
-    Add to utils/model_utils.py :: get_data_dir():
-
-        elif 'pamap2' in dataset.lower():
-            dataset_ = dataset.lower().replace('alpha','').replace('ratio','').split('-')
-            alpha, ratio = dataset_[1], dataset_[2]
-            path_prefix = os.path.join('data', 'PAMAP2',
-                                       f'u{NUM_USERS}-alpha{alpha}-ratio{ratio}')
-            train_data_dir = os.path.join(path_prefix, 'train')
-            test_data_dir  = os.path.join(path_prefix, 'test')
-            proxy_data_dir = ''
-
-    Add to utils/model_utils.py :: get_dataset_name():
-
-        elif 'pamap2' in dataset.lower():
-            passed_dataset = 'pamap2'
-
-    Add to utils/model_config.py :: CONFIGS_:
-        # input is (1, 8, 8) -> conv6 -> (6,4,4) -> conv16 -> (16,2,2) -> flat=64
-        'pamap2': ([6, 16, 'F'], 1, 12, 64, 32),
-    Add to utils/model_config.py :: GENERATORCONFIGS:
-        'pamap2': (256, 32, 1, 12, 32),
-    Add to utils/model_config.py :: RUNCONFIGS:
-        'pamap2': {
-            'ensemble_lr': 1e-4,
-            'ensemble_batch_size': 128,
-            'ensemble_epochs': 50,
-            'num_pretrain_iters': 20,
-            'ensemble_alpha': 1,
-            'ensemble_beta': 0,
-            'unique_labels': 12,
-            'generative_alpha': 10,
-            'generative_beta': 1,
-            'weight_decay': 1e-2,
-        },
-    --------------------------------------------------------------------
-    """).strip())
+    print(
+        "PAMAP2 model wiring is already merged into utils/model_utils.py and "
+        "utils/model_config.py (CONFIGS_/GENERATORCONFIGS/RUNCONFIGS each carry "
+        "a 'pamap2' entry). main.py --dataset PAMAP2-alpha<a>-ratio<r> will run "
+        "end-to-end against this prepared split."
+    )
 
     return f"PAMAP2-alpha{args.alpha}-ratio{args.sampling_ratio}"
 
@@ -472,12 +436,6 @@ def main() -> None:
 
     if args.prepare_only:
         return
-
-    if args.dataset_kind == "pamap2":
-        print("WARNING: PAMAP2 model wiring isn't merged yet; main.py will fail "
-              "until you patch utils/model_utils.py and utils/model_config.py "
-              "(see hint above). Re-run with --prepare_only if you only want "
-              "the dataset on disk.", file=sys.stderr)
 
     failed: List[str] = []
     for algorithm in args.algorithms:

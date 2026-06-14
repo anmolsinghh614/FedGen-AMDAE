@@ -70,9 +70,12 @@ synthesises latent representations to regularise client training).
 .
 ├─ main.py                          # argparse entry point (one run, one algorithm)
 ├─ run_paper_pipeline.py            # one-shot end-to-end paper-results driver
+├─ produce_paper_results.py         # thin "rebuild every paper artifact" wrapper
 ├─ goal1_zero_missing_baseline.py   # 0% missing baseline + AMDAE declaration
-├─ goal2_real_dataset_experiment.py # UCI HAR (and PAMAP2 prep) wrapper
+├─ goal2_real_dataset_experiment.py # UCI HAR + PAMAP2 wrapper
 ├─ goal3_metrics_table.py           # F1 / Precision / Recall paper tables
+├─ plot_per_class_f1_heatmap.py     # paper Figs 5-8 (per-class F1 heatmap)
+├─ plot_experiment_results.py       # paper Fig 13 (acc + loss side-by-side)
 ├─ run_all.sh, run_experiments.sh,  # legacy shell drivers
 │  batch_run_jobs.sh
 │
@@ -523,6 +526,33 @@ python run_paper_pipeline.py --skip_train -y
 
 ```bash
 python run_paper_pipeline.py --dry_run -y
+```
+
+### 9.2.1 The "one-button paper rebuild" wrapper (`produce_paper_results.py`)
+
+If you just cloned a fresh copy of the repo on a new machine and want to
+reproduce **everything the paper still needs in one go** — the 0% baseline
+column, the alpha × missing-rate sweep, UCI HAR (MCAR + MAR + MNAR),
+PAMAP2, the F1/Precision/Recall table, the per-class F1 heatmaps, and the
+acc-vs-loss panels — run the thin wrapper:
+
+```bash
+python produce_paper_results.py
+```
+
+It calls `run_paper_pipeline.py` four times with the right flags
+(MNIST/EMNIST sweep, then UCI HAR per-mechanism, then PAMAP2, then a final
+goal3 sweep over every `results/metrics_mr*` directory it finds), and ends
+with a checklist of where each artifact landed and which sentence in the
+paper to update from it.
+
+Useful flags:
+
+```bash
+python produce_paper_results.py --quick           # ~30-min sanity smoke
+python produce_paper_results.py --dry_run -y      # print plan, run nothing
+python produce_paper_results.py --skip_real       # MNIST/EMNIST only
+python produce_paper_results.py --device cuda --times 3 --num_glob_iters 100
 ```
 
 ### 9.3 Resumability

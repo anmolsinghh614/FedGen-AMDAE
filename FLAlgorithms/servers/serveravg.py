@@ -13,7 +13,11 @@ class FedAvg(Server):
 
         # Initialize data for all  users
         data = read_data(args.dataset)
-        data = apply_amdae_imputation(data, missing_rate=args.missing_rate)
+        data = apply_amdae_imputation(
+            data,
+            missing_rate=args.missing_rate,
+            missing_pattern=getattr(args, 'missing_pattern', 'random'),
+        )
 
         total_users = len(data[0])
         self.use_adam = 'adam' in self.algorithm.lower()

@@ -60,6 +60,7 @@ SAMPLING_RATIO = {
     "Mnist": 0.5,
     "EMnist": 0.1,
     "UCI HAR": 0.5,
+    "PAMAP2": 0.5,
 }
 
 # Per-dataset path patterns the model code expects on disk.
@@ -67,9 +68,11 @@ DATASET_SPLIT_DIR_TEMPLATE = {
     "Mnist": "data/Mnist/u20c10-alpha{alpha}-ratio{ratio}",
     "EMnist": "data/EMnist/u20-letters-alpha{alpha}-ratio{ratio}",
     "UCI HAR": "data/UCI HAR/u20-alpha{alpha}-ratio{ratio}",
+    "PAMAP2": "data/PAMAP2/u20-alpha{alpha}-ratio{ratio}",
 }
 
 # Where to invoke each generator from, and the script name.
+# PAMAP2 has no in-tree generator; use goal2_real_dataset_experiment.py first.
 DATASET_GENERATORS = {
     "Mnist": ("data/Mnist", "generate_niid_dirichlet.py"),
     "EMnist": ("data/EMnist", "generate_niid_dirichlet.py"),
@@ -106,6 +109,22 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--include_ucihar", action="store_true",
                    help="Append 'UCI HAR' to --datasets for the entire sweep.")
+    p.add_argument("--include_pamap2", action="store_true",
+                   help="Append 'PAMAP2' to --datasets for the entire sweep. "
+                        "Requires that you have run goal2_real_dataset_experiment.py "
+                        "--dataset_kind pamap2 --prepare_only first.")
+    p.add_argument("--missing_pattern", choices=[
+        "random", "mcar", "mar", "mnar",
+        "fixed_intervals", "continuous_periods",
+    ], default="random",
+        help="Missing-data mechanism passed to main.py and AM-DAE simulator. "
+             "'mar' uses row labels, 'mnar' uses cell magnitudes.")
+    p.add_argument("--paper_preset", choices=["none", "ucihar", "ucihar_3mech"],
+                   default="none",
+                   help="Pre-canned sweeps that match the paper. "
+                        "'ucihar' = alpha=0.5, missing=0.15, MCAR; "
+                        "'ucihar_3mech' = alpha=0.5, missing=0.15, sweeping "
+                        "MCAR/MAR/MNAR (one orchestration pass each).")
     p.add_argument("--quick", action="store_true",
                    help="Tiny sanity-check run: 5 rounds, 1 alpha, 2 missing-rates.")
 
@@ -127,6 +146,26 @@ def apply_quick(args: argparse.Namespace) -> None:
     args.alphas = [args.alphas[0]]
     if len(args.missing_rates) > 2:
         args.missing_rates = args.missing_rates[:2]
+
+
+def apply_paper_preset(args: argparse.Namespace) -> None:
+    """Override the sweep grid to match a published paper section."""
+    if args.paper_preset == "none":
+        return
+    if args.paper_preset.startswith("ucihar"):
+        args.datasets = ["UCI HAR"]
+        args.include_ucihar = True
+        args.alphas = [0.5]
+        args.missing_rates = [0.15]
+        if args.paper_preset == "ucihar_3mech":
+            # Caller is expected to re-run the orchestrator three times,
+            # one per mechanism. We only set the *default* mechanism here.
+            print("[preset] ucihar_3mech selected: this single invocation runs "
+                  "missing_pattern=", args.missing_pattern, "; re-run with "
+                  "--missing_pattern mar and --missing_pattern mnar to cover "
+                  "all three mechanisms reported in paper Sec.5.6.")
+        else:
+            args.missing_pattern = "random"
 
 
 # -------------------------------------------------------------------------
@@ -158,6 +197,15 @@ def expected_h5(args: argparse.Namespace, token: str, algorithm: str,
     return ROOT / f"results/models_mr{mr_int}" / f"{name}.h5"
 
 
+def all_seeds_done(args: argparse.Namespace, token: str, algorithm: str,
+                   mr_int: int) -> bool:
+    """A cell is considered done only when every seed 0..times-1 has its h5."""
+    return all(
+        expected_h5(args, token, algorithm, seed, mr_int).exists()
+        for seed in range(args.times)
+    )
+
+
 def dataset_token(dataset: str, alpha: float) -> str:
     ratio = SAMPLING_RATIO.get(dataset, 0.5)
     return f"{dataset}-alpha{alpha}-ratio{ratio}"
@@ -180,8 +228,7 @@ def phase_declaration(args: argparse.Namespace) -> None:
 def phase_data_prep(args: argparse.Namespace) -> None:
     banner("PHASE 1  Auto-generate Dirichlet splits if missing")
     for ds in args.datasets:
-        ratio = SAMPLING_RATIO[ds]
-        gen_dir, gen_script = DATASET_GENERATORS[ds]
+        ratio = SAMPLING_RATIO.get(ds, 0.5)
         for alpha in args.alphas:
             split_dir = ROOT / DATASET_SPLIT_DIR_TEMPLATE[ds].format(
                 alpha=alpha, ratio=ratio)
@@ -189,6 +236,30 @@ def phase_data_prep(args: argparse.Namespace) -> None:
             if train_dir.is_dir() and any(train_dir.iterdir()):
                 print(f"[skip] split exists: {split_dir}")
                 continue
+
+            if ds == "PAMAP2":
+                # PAMAP2 has no in-tree Dirichlet generator; goal2 owns prep.
+                print(f"[gen ] PAMAP2 split needed: {split_dir}")
+                cmd = [sys.executable, "goal2_real_dataset_experiment.py",
+                       "--dataset_kind", "pamap2",
+                       "--alpha", str(alpha),
+                       "--sampling_ratio", str(ratio),
+                       "--n_user", str(args.n_user_split),
+                       "--prepare_only"]
+                rc = run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
+                if rc != 0:
+                    raise SystemExit(
+                        f"\nPAMAP2 data preparation failed for alpha={alpha}.\n"
+                        f"Network access is required to download the archive; "
+                        f"re-run goal2_real_dataset_experiment.py manually if "
+                        f"you need to debug.")
+                continue
+
+            if ds not in DATASET_GENERATORS:
+                print(f"[warn] no generator registered for '{ds}'; skipping")
+                continue
+
+            gen_dir, gen_script = DATASET_GENERATORS[ds]
             print(f"[gen ] split needed:  {split_dir}")
             cmd = [sys.executable, gen_script,
                    "--alpha", str(alpha),
@@ -219,25 +290,37 @@ def phase_train(args: argparse.Namespace) -> None:
                 models_dir.mkdir(parents=True, exist_ok=True)
 
                 # Safety: utils/metrics_utils.py hard-codes results/metrics/.
-                # If a stale results/metrics/ exists from a previous batch,
-                # we must move it aside FIRST so this missing-rate's
-                # per-round files end up in their own folder later.
+                # On a *clean* start (no metrics_mr<R> dirs yet), a leftover
+                # results/metrics/ is almost certainly from a prior crash;
+                # we cannot tell which missing-rate it belongs to, so we
+                # refuse to silently mis-attribute it. The user must clear
+                # or rename it before resuming.
                 stale = ROOT / "results/metrics"
-                if stale.is_dir() and not metrics_dir.is_dir():
-                    print(f"[stage] moving leftover {stale} -> {metrics_dir}")
-                    if not args.dry_run:
-                        shutil.move(str(stale), str(metrics_dir))
+                any_mr_dir = any(
+                    (ROOT / f"results/metrics_mr{int(round(m * 100))}").is_dir()
+                    for m in args.missing_rates
+                )
+                if stale.is_dir() and not any_mr_dir:
+                    raise SystemExit(
+                        f"\n[ERROR] Found leftover {stale} but no results/metrics_mr<RR>/\n"
+                        f"        directories exist yet, so the orchestrator cannot tell\n"
+                        f"        which missing-rate this data belongs to.\n"
+                        f"        Move/rename or delete it manually, then re-run.\n"
+                        f"        (Hint: if you know it came from missing_rate=R, run\n"
+                        f"        `mv results/metrics results/metrics_mrRR` first.)"
+                    )
 
                 for algo in args.algorithms:
-                    expected = expected_h5(args, token, algo, 0, mr_int)
-                    if expected.exists():
-                        print(f"[skip] already trained: {expected.name}")
+                    if all_seeds_done(args, token, algo, mr_int):
+                        print(f"[skip] {algo} {token} mr={mr} -- all "
+                              f"{args.times} seed(s) already trained")
                         continue
                     cmd = [
                         sys.executable, "main.py",
                         "--dataset", token,
                         "--algorithm", algo,
                         "--missing_rate", str(mr),
+                        "--missing_pattern", args.missing_pattern,
                         "--num_glob_iters", str(args.num_glob_iters),
                         "--local_epochs", str(args.local_epochs),
                         "--num_users", str(args.num_users),
@@ -255,19 +338,23 @@ def phase_train(args: argparse.Namespace) -> None:
 
                 # End of one missing-rate sweep -- move per-round metrics aside.
                 live = ROOT / "results/metrics"
-                if live.is_dir():
+                if live.is_dir() and not args.dry_run:
                     if metrics_dir.is_dir():
-                        # merge: copy each <dataset> subdir into the missing-rate root
+                        # Per-file merge: preserve existing data from earlier
+                        # (ds, alpha) pairs that already wrote into this same
+                        # missing-rate bucket.
                         for sub in live.iterdir():
                             target = metrics_dir / sub.name
-                            if target.exists():
-                                shutil.rmtree(target)
-                            shutil.move(str(sub), str(target))
+                            target.mkdir(parents=True, exist_ok=True)
+                            if sub.is_dir():
+                                for h5 in sub.iterdir():
+                                    shutil.move(str(h5), str(target / h5.name))
+                            else:
+                                shutil.move(str(sub), str(target / sub.name))
                         shutil.rmtree(live, ignore_errors=True)
                         print(f"[move] merged results/metrics -> {metrics_dir}")
                     else:
-                        if not args.dry_run:
-                            shutil.move(str(live), str(metrics_dir))
+                        shutil.move(str(live), str(metrics_dir))
                         print(f"[move] results/metrics -> {metrics_dir}")
 
 
@@ -311,10 +398,16 @@ def phase_plots(args: argparse.Namespace) -> None:
                           f"{token}, mr={mr}")
                     continue
 
+                # f1score_all/confusion_matrix_all scan rounds 1..R (1-indexed),
+                # but main.py writes round_0..round_{N-1}. Asking for N-1 lets
+                # them see every file that was actually saved (round 0 is still
+                # not included on the curve because both tools are 1-indexed).
+                scan_rounds = max(1, args.num_glob_iters - 1)
+
                 # F1-vs-round (one figure per dataset, all algorithms)
                 cmd = [sys.executable, "f1score_all.py",
                        "--dataset", token,
-                       "--rounds", str(args.num_glob_iters),
+                       "--rounds", str(scan_rounds),
                        "--input-root", str(metrics_dir),
                        "--output-root", str(fig_dir)]
                 run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
@@ -322,12 +415,19 @@ def phase_plots(args: argparse.Namespace) -> None:
                 # Last-round confusion matrices (one per algorithm)
                 cmd = [sys.executable, "confusion_matrix_all.py",
                        "--dataset", token,
-                       "--rounds", str(args.num_glob_iters),
+                       "--rounds", str(scan_rounds),
                        "--input-root", str(metrics_dir),
                        "--output-root", str(fig_dir)]
                 run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
 
-                # Paper-style accuracy curves + summary table
+                # Per-class F1 heatmap (paper Figs 5-8)
+                cmd = [sys.executable, "plot_per_class_f1_heatmap.py",
+                       "--dataset", token,
+                       "--input-root", str(metrics_dir),
+                       "--output-root", str(fig_dir / "heatmap_f1")]
+                run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
+
+                # Paper-style accuracy curves (+ optional loss panel)
                 if models_dir.is_dir():
                     cmd = [sys.executable, "plot_experiment_results.py",
                            "--dataset", token,
@@ -340,23 +440,23 @@ def phase_plots(args: argparse.Namespace) -> None:
                            "--gen_batch_size", str(args.gen_batch_size),
                            "--local_epochs", str(args.local_epochs),
                            "--learning_rate", str(args.learning_rate),
-                           "--times", str(args.times)]
+                           "--times", str(args.times),
+                           "--plot_loss"]
                     run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
 
 
 # -------------------------------------------------------------------------
 # PHASE 5 -- UCI HAR analysis (only if user asked)
 # -------------------------------------------------------------------------
-def phase_ucihar(args: argparse.Namespace) -> None:
-    if not args.include_ucihar or "UCI HAR" not in args.datasets:
-        return
-    banner("PHASE 5  UCI HAR full sweep via goal2 (data prep + train)")
+def phase_real_dataset(args: argparse.Namespace, kind: str, label: str) -> None:
+    """Drive goal2_real_dataset_experiment for UCI HAR or PAMAP2."""
+    banner(f"PHASE  {label}  full sweep via goal2 (data prep + train)")
     for alpha in args.alphas:
         for mr in args.missing_rates:
             cmd = [sys.executable, "goal2_real_dataset_experiment.py",
-                   "--dataset_kind", "ucihar",
+                   "--dataset_kind", kind,
                    "--alpha", str(alpha),
-                   "--sampling_ratio", str(SAMPLING_RATIO["UCI HAR"]),
+                   "--sampling_ratio", str(SAMPLING_RATIO.get(label, 0.5)),
                    "--missing_rate", str(mr),
                    "--n_user", str(args.n_user_split),
                    "--num_glob_iters", str(args.num_glob_iters),
@@ -370,6 +470,18 @@ def phase_ucihar(args: argparse.Namespace) -> None:
                    "--algorithms", *args.algorithms,
                    "--skip_generate"]
             run_cmd(cmd, cwd=ROOT, dry=args.dry_run)
+
+
+def phase_ucihar(args: argparse.Namespace) -> None:
+    if not args.include_ucihar or "UCI HAR" not in args.datasets:
+        return
+    phase_real_dataset(args, "ucihar", "UCI HAR")
+
+
+def phase_pamap2(args: argparse.Namespace) -> None:
+    if not args.include_pamap2 or "PAMAP2" not in args.datasets:
+        return
+    phase_real_dataset(args, "pamap2", "PAMAP2")
 
 
 # -------------------------------------------------------------------------
@@ -390,6 +502,10 @@ def confirm(args: argparse.Namespace) -> None:
     print(f"  num_users/round: {args.num_users}")
     print(f"  device         : {args.device}")
     print(f"  total trainings: {n}")
+    print(f"  missing_pattern: {args.missing_pattern}")
+    print(f"  paper_preset   : {args.paper_preset}")
+    print(f"  include_ucihar : {args.include_ucihar}")
+    print(f"  include_pamap2 : {args.include_pamap2}")
     print(f"  skip_train     : {args.skip_train}")
     print(f"  skip_table     : {args.skip_table}")
     print(f"  skip_plot      : {args.skip_plot}")
@@ -407,8 +523,11 @@ def main() -> None:
     args = parse_args()
     if args.quick:
         apply_quick(args)
+    apply_paper_preset(args)
     if args.include_ucihar and "UCI HAR" not in args.datasets:
         args.datasets.append("UCI HAR")
+    if args.include_pamap2 and "PAMAP2" not in args.datasets:
+        args.datasets.append("PAMAP2")
 
     confirm(args)
 
@@ -422,6 +541,7 @@ def main() -> None:
     if not args.skip_plot:
         phase_plots(args)
     phase_ucihar(args)
+    phase_pamap2(args)
 
     banner("DONE")
     print("Artifacts:")
@@ -429,10 +549,12 @@ def main() -> None:
     print("  results/models_mr<RR>/           per-run accuracy/loss HDF5")
     print("  results/metrics_mr<RR>/          per-round y_true/y_pred HDF5")
     print("  results/tables/                  long + wide F1/Precision/Recall")
-    print("  results/figures/mr<RR>/          F1-by-round + confusion matrices")
-    print("  results/experiment_summary/      paper-style accuracy curves")
+    print("  results/figures/mr<RR>/          F1-by-round + confusion matrices + heatmap_f1/")
+    print("  results/experiment_summary/      paper-style accuracy curves + acc_loss panels")
     if args.include_ucihar:
         print("  results/real_dataset_experiments/  UCI HAR summary")
+    if args.include_pamap2:
+        print("  results/real_dataset_experiments/  PAMAP2 summary")
 
 
 if __name__ == "__main__":
