@@ -147,7 +147,10 @@ class Server:
 
     def save_results(self, args):
         alg = get_log_path(args, args.algorithm, self.seed, args.gen_batch_size)
-        with h5py.File("./{}/{}.h5".format(self.save_path, alg), 'w') as hf:
+        # NOTE: do NOT prepend "./" -- when self.save_path is absolute,
+        # "./{abs_path}" resolves as a relative path on POSIX and breaks.
+        os.makedirs(self.save_path, exist_ok=True)
+        with h5py.File(os.path.join(self.save_path, f"{alg}.h5"), 'w') as hf:
             for key in self.metrics:
                 hf.create_dataset(key, data=self.metrics[key])
             hf.close()

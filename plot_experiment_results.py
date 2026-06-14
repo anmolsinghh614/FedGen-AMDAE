@@ -18,7 +18,7 @@ def get_label_name(name):
 def load_results(args, algorithm, seed=0):
     try:
         alg = get_log_path(args, algorithm, seed, args.gen_batch_size)
-        hf = h5py.File(f"./{args.result_path}/{alg}.h5", 'r')
+        hf = h5py.File(os.path.join(args.result_path, f"{alg}.h5"), 'r')
         glob_acc = np.array(hf.get('glob_acc')[:])
         return glob_acc
     except Exception as e:
@@ -30,7 +30,7 @@ def load_curves(args, algorithm, seed=0):
     """Return (glob_acc, glob_loss) for one algorithm/seed. Either may be None."""
     try:
         alg = get_log_path(args, algorithm, seed, args.gen_batch_size)
-        with h5py.File(f"./{args.result_path}/{alg}.h5", 'r') as hf:
+        with h5py.File(os.path.join(args.result_path, f"{alg}.h5"), 'r') as hf:
             acc = np.array(hf['glob_acc'][:]) if 'glob_acc' in hf else None
             loss = np.array(hf['glob_loss'][:]) if 'glob_loss' in hf else None
         return acc, loss

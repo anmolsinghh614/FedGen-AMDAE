@@ -18,7 +18,7 @@ n_seeds=3
 
 def load_results(args, algorithm, seed):
     alg = get_log_path(args, algorithm, seed, args.gen_batch_size)
-    hf = h5py.File("./{}/{}.h5".format(args.result_path, alg), 'r')
+    hf = h5py.File(os.path.join(args.result_path, f"{alg}.h5"), 'r')
     metrics = {}
     for key in METRICS:
         metrics[key] = np.array(hf.get(key)[:])
