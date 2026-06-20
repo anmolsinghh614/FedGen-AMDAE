@@ -467,30 +467,34 @@ def make_plots(args: argparse.Namespace) -> None:
             run(cmd, dry=args.dry_run, allow_fail=True)
 
         # --- F1-by-round line chart -----------------------------------------
-        # NOTE: f1score_all.py auto-discovers datasets and algorithms from
-        # the metrics dir; it does NOT accept --datasets / --algorithms.
+        # f1score_all.py uses --dataset (singular) + --algos (not --algorithms)
         if _have("f1score_all.py"):
             cmd = [PY, "f1score_all.py",
+                   "--dataset", DATASET_TOKEN,
+                   "--algos", *args.algorithms,
                    "--input-root", str(metrics_dir),
                    "--output-root", str(figures_dir / "f1_by_round"),
                    "--rounds", str(last_round)]
             run(cmd, dry=args.dry_run, allow_fail=True)
 
         # --- last-round confusion matrix per algorithm ----------------------
-        # Same auto-discovery convention as f1score_all.py.
+        # Same flag convention as f1score_all.py: --dataset + --algos.
         if _have("confusion_matrix_all.py"):
             cmd = [PY, "confusion_matrix_all.py",
+                   "--dataset", DATASET_TOKEN,
+                   "--algos", *args.algorithms,
                    "--input-root", str(metrics_dir),
                    "--output-root", str(figures_dir / "confusion_matrix"),
                    "--rounds", str(last_round)]
             run(cmd, dry=args.dry_run, allow_fail=True)
 
         # --- accuracy + training-loss side-by-side (paper Fig 13) -----------
+        # plot_experiment_results.py REQUIRES --missing_rate.
         if _have("plot_experiment_results.py"):
             cmd = [PY, "plot_experiment_results.py",
                    "--dataset", DATASET_TOKEN,
-                   "--algorithms",
-                   ",".join(args.algorithms),
+                   "--algorithms", ",".join(args.algorithms),
+                   "--missing_rate", str(args.missing_rate),
                    "--num_glob_iters", str(args.num_glob_iters),
                    "--local_epochs", str(args.local_epochs),
                    "--num_users", str(args.num_users),
