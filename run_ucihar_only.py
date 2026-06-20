@@ -173,16 +173,27 @@ def maybe_download_ucihar(args: argparse.Namespace) -> None:
 
 
 def ensure_dirichlet_split(args: argparse.Namespace) -> None:
-    """Generate the per-user split required by main.py if it isn't already there."""
-    split_dir = ROOT / "data" / "UCI HAR" / f"u{args.num_users}-alpha{args.alpha}-ratio0.5"
+    """Generate the per-user split required by main.py if it isn't there.
+
+    NOTE: UCI HAR's get_data_dir() in utils/model_utils.py hard-codes the
+    path prefix to 'u20-alpha{a}-ratio{r}'. The federation MUST have 20
+    users on disk (this is independent of --num_users, which is the number
+    sampled per round). Sampling ratio is also hard-coded to 0.5 by the
+    DATASET_TOKEN we pass to main.py."""
+    n_user_total = 20
+    sampling_ratio = 0.5
+    split_dir = ROOT / "data" / "UCI HAR" / f"u{n_user_total}-alpha{args.alpha}-ratio{sampling_ratio}"
     if (split_dir / "train").is_dir() and (split_dir / "test").is_dir():
         print(f"[ok] Dirichlet split present at {split_dir}")
         return
     gen = ROOT / "data" / "UCI HAR" / "generate_niid_dirichlet.py"
     if not gen.is_file():
         raise SystemExit(f"[ERROR] missing generator: {gen}")
-    cmd = [PY, str(gen), "--n_users", str(args.num_users),
-           "--alpha", str(args.alpha), "--sampling_ratio", "0.5"]
+    # generator flag is singular: --n_user (not --n_users)
+    cmd = [PY, str(gen),
+           "--n_user", str(n_user_total),
+           "--alpha", str(args.alpha),
+           "--sampling_ratio", str(sampling_ratio)]
     rc = run(cmd, dry=args.dry_run, cwd=ROOT / "data" / "UCI HAR")
     if rc != 0 and not args.dry_run:
         raise SystemExit(f"[ERROR] failed to generate Dirichlet split (rc={rc})")
