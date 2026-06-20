@@ -539,55 +539,102 @@ def calculate_comprehensive_imputation_metrics(original_data: np.ndarray, impute
         'Adaptive-Loss': adaptive_loss
     }
 
-def calculate_overall_score(all_results: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    """Calculate normalized overall performance scores across all methods (lower is better)."""
-    weights = {
-        'RMSE': 0.2,
-        'MAPE': 0.2,
-        'KL-Divergence': 0.2,
-        'Mean-Difference': 0.2,
-        'Adaptive-Loss': 0.2
-    }
-    
-    # Find max value for each metric across all methods
-    max_vals = {}
-    metrics = list(next(iter(all_results.values())).keys())
+# ---------------------------------------------------------------------------
+# Composite-score configuration
+# ---------------------------------------------------------------------------
+#
+# `calculate_comprehensive_imputation_metrics` reports 5 metrics:
+#     RMSE, MAPE, KL-Divergence, Mean-Difference, Adaptive-Loss.
+#
+# Two of those are degenerate as RANKING signals (they remain in the plot for
+# transparency, but should NOT drive imputer selection):
+#
+#   * MAPE: |x - x_hat| / (|x| + 1e-8). On standardised IMU / image data
+#     a non-trivial fraction of ground-truth entries are near zero, so the
+#     denominator collapses and MAPE explodes to ~1e6+ for any imputer that
+#     fills with non-zero values (including AM-DAE). Mean / Median / Zero
+#     happen to fill with values near the per-feature centre, so they look
+#     artificially better. This is a well-known degeneracy of MAPE on
+#     near-zero ground truth.
+#
+#   * Mean-Difference: |mean(x) - mean(x_hat)| over the missing positions.
+#     This is exactly zero by construction for Mean Imputation (and ~zero
+#     for Median Imputation on roughly-symmetric distributions). It is a
+#     metric of bias only, not of point-wise reconstruction quality, and
+#     hard-codes Mean Imputation as the winner.
+#
+# The composite ranking therefore aggregates only the three well-behaved
+# point-wise / distributional metrics. Override via the `metrics` argument
+# if you want the legacy 5-metric behaviour.
+RELIABLE_METRICS: Tuple[str, ...] = ('RMSE', 'KL-Divergence', 'Adaptive-Loss')
+
+
+def calculate_overall_score(all_results: Dict[str, Dict[str, float]],
+                            metrics: Optional[Tuple[str, ...]] = None
+                            ) -> Dict[str, float]:
+    """Calculate normalized overall performance scores across all methods.
+
+    Lower is better. Each metric is min-max-normalised by the max across
+    methods, then averaged with equal weights over the chosen metric set
+    (default: ``RELIABLE_METRICS``).
+    """
+    if metrics is None:
+        metrics = RELIABLE_METRICS
+
+    available = list(next(iter(all_results.values())).keys())
+    metrics = tuple(m for m in metrics if m in available)
+    if not metrics:
+        # Fall back to whatever is present so we never crash on a
+        # caller passing an unexpected metric set.
+        metrics = tuple(available)
+
+    weight = 1.0 / len(metrics)
+
+    max_vals: Dict[str, float] = {}
     for metric in metrics:
         max_vals[metric] = max(
-            all_results[method][metric] if np.isfinite(all_results[method][metric]) else 0
+            all_results[method][metric]
+            if np.isfinite(all_results[method][metric]) else 0
             for method in all_results
         )
-    
-    overall_scores = {}
+
+    overall_scores: Dict[str, float] = {}
     for method, metric_vals in all_results.items():
-        score = 0
-        for metric, value in metric_vals.items():
-            if metric in max_vals and max_vals[metric] > 0:
-                # Normalize by max value across all methods
-                norm_val = value / max_vals[metric] if np.isfinite(value) else 1000
-                weight = weights.get(metric, 0)
+        score = 0.0
+        for metric in metrics:
+            value = metric_vals.get(metric, np.nan)
+            if max_vals.get(metric, 0) > 0:
+                norm_val = value / max_vals[metric] if np.isfinite(value) else 1000.0
                 score += weight * norm_val
-            else:
-                score += 0
         overall_scores[method] = score
     return overall_scores
 
-def select_best_imputation_method(results: Dict[str, Dict[str, float]]) -> str:
-    """Select the best imputation method based on normalized overall performance score."""
-    # Use the normalized scoring function that takes all results
-    overall_scores = calculate_overall_score(results)
-    
+
+def select_best_imputation_method(results: Dict[str, Dict[str, float]],
+                                  metrics: Optional[Tuple[str, ...]] = None
+                                  ) -> str:
+    """Select the best imputation method based on the composite score.
+
+    By default uses ``RELIABLE_METRICS`` (RMSE + KL-Divergence + Adaptive-Loss);
+    MAPE and Mean-Difference are excluded because they are degenerate
+    ranking signals on standardised data (see RELIABLE_METRICS docstring).
+    """
+    used_metrics = tuple(metrics) if metrics is not None else RELIABLE_METRICS
+    overall_scores = calculate_overall_score(results, metrics=used_metrics)
+
     best_method = min(overall_scores, key=overall_scores.get)
-    
+
     print(f"\n=== IMPUTATION METHOD PERFORMANCE RANKING (Normalized) ===")
+    print(f"   metrics aggregated: {', '.join(used_metrics)}")
+    print(f"   metrics excluded  : MAPE, Mean-Difference  "
+          f"(degenerate on near-zero / centred ground truth; see code docs)")
     sorted_methods = sorted(overall_scores.items(), key=lambda x: x[1])
-    
     for rank, (method, score) in enumerate(sorted_methods, 1):
-        print(f"{rank}. {method}: {score:.4f}")
-    
-    print(f"\n🏆 BEST PERFORMING METHOD: {best_method}")
+        print(f"   {rank}. {method}: {score:.4f}")
+
+    print(f"\n>> BEST PERFORMING METHOD: {best_method}")
     print(f"   Overall Normalized Score: {overall_scores[best_method]:.4f}")
-    
+
     return best_method
 
 
@@ -635,12 +682,14 @@ def plot_comprehensive_imputation_comparison(results: Dict[str, Dict[str, float]
     if len(axes) > len(metrics):
         overall_scores = calculate_overall_score(results)
         score_values = list(overall_scores.values())
-        
-        bars = axes[len(metrics)].bar(range(len(methods)), score_values, 
+
+        bars = axes[len(metrics)].bar(range(len(methods)), score_values,
                                      color=colors[:len(methods)], alpha=0.7)
-        
-        axes[len(metrics)].set_title('Overall Performance Score (Normalized)\n(Lower is Better)', 
-                                   fontsize=12, fontweight='bold')
+
+        axes[len(metrics)].set_title(
+            f'Overall Performance Score (Normalized)\n'
+            f'avg of {", ".join(RELIABLE_METRICS)}  --  Lower is Better',
+            fontsize=11, fontweight='bold')
         axes[len(metrics)].set_ylabel('Normalized Score')
         axes[len(metrics)].set_xticks(range(len(methods)))
         axes[len(metrics)].set_xticklabels(methods, rotation=45, ha='right')
@@ -671,7 +720,20 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
                           device: str = 'cpu',
                           compare_methods: bool = True,
                           save_plot_path: str = 'results/comprehensive_imputation_comparison.png',
+                          force_imputer: Optional[str] = None,
                           **kwargs) -> Tuple:
+    """Apply imputation to a federated-data tuple.
+
+    Args (selected):
+        force_imputer: If set to one of {'AMDAE', 'Mean Imputation',
+            'Median Imputation', 'Zero Imputation'} (case-insensitive,
+            ``'amdae'`` is also accepted), the composite-score winner
+            selection is bypassed and the named imputer is used unconditionally.
+            All four imputers still run so the comparison plot is unchanged.
+            Use this when the paper claims to use a specific imputer
+            (e.g. ``force_imputer='amdae'`` to guarantee FedGen-AMDAE numbers
+            were truly trained on AM-DAE-imputed data).
+    """
     
     print(f"Starting Enhanced AM-DAE imputation with {missing_rate*100}% missing data...")
     print(f"Missing pattern: {missing_pattern}")
@@ -747,8 +809,29 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
             else:
                 print(f"    {metric_name}: inf")
     
-    # Select best method
-    best_method = select_best_imputation_method(results)
+    # Select method: hard-force if requested, otherwise use composite score
+    if force_imputer:
+        # Map a few common shorthand names to the canonical imputer keys.
+        canonical = {k.lower(): k for k in imputed_data_dict.keys()}
+        canonical.update({
+            'amdae': 'AMDAE',
+            'am-dae': 'AMDAE',
+            'mean': 'Mean Imputation',
+            'median': 'Median Imputation',
+            'zero': 'Zero Imputation',
+        })
+        key = canonical.get(force_imputer.lower())
+        if key is None or key not in imputed_data_dict:
+            valid = ', '.join(sorted(imputed_data_dict.keys()))
+            raise ValueError(
+                f"force_imputer={force_imputer!r} not recognised. "
+                f"Valid options: {valid} (also accepted: 'amdae', 'mean', "
+                f"'median', 'zero').")
+        best_method = key
+        print(f"\n>> FORCED IMPUTER: {best_method}  "
+              f"(composite-score selection bypassed)")
+    else:
+        best_method = select_best_imputation_method(results)
     final_imputed_data = imputed_data_dict[best_method]
     
     # Plot comprehensive comparison.
