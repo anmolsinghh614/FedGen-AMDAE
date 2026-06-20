@@ -751,10 +751,23 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
     best_method = select_best_imputation_method(results)
     final_imputed_data = imputed_data_dict[best_method]
     
-    # Plot comprehensive comparison
+    # Plot comprehensive comparison.
+    #   * Skip if the file already exists -- the plot is identical across
+    #     (algo, dataset, alpha, missing_rate) cells, so re-rendering it
+    #     90+ times wastes CPU + disk.
+    #   * Wrap in try/except: a transient I/O failure (full disk, perm
+    #     denied, etc.) here must NOT kill the federated training run.
     if compare_methods and len(results) > 1:
-        plot_path = plot_comprehensive_imputation_comparison(results, save_plot_path)
-        print(f"\nComprehensive comparison plot saved to: {plot_path}")
+        already_there = isinstance(save_plot_path, str) and os.path.exists(save_plot_path)
+        if already_there:
+            print(f"\nComprehensive comparison plot already exists, skipping: {save_plot_path}")
+        else:
+            try:
+                plot_path = plot_comprehensive_imputation_comparison(results, save_plot_path)
+                print(f"\nComprehensive comparison plot saved to: {plot_path}")
+            except Exception as exc:
+                print(f"\n[WARN] Could not save comprehensive comparison plot to "
+                      f"{save_plot_path}: {exc}. Continuing training.")
     
     # Reconstruct federated data using the best method
     reconstructed_data = reconstruct_federated_data(
