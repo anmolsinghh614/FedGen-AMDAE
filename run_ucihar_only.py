@@ -506,6 +506,32 @@ def make_plots(args: argparse.Namespace) -> None:
                    "--plot_loss"]
             run(cmd, dry=args.dry_run, allow_fail=True)
 
+            # plot_experiment_results.py writes to a path keyed only on
+            # (dataset, alpha, missing_rate) -- NOT on mechanism -- so each
+            # mechanism overwrites the previous one. Rename + copy into
+            # mech_root/figures/ to preserve all three panels.
+            if not args.dry_run:
+                src_root = ROOT / "results" / "experiment_summary"
+                stem = (f"UCI HAR_alpha{args.alpha}_miss{args.missing_rate}")
+                produced = [
+                    f"acc_loss_{stem}.png",
+                    f"plot_{stem}.png",
+                    f"table_{stem}.txt",
+                ]
+                fig_out = mech_root / "figures" / "experiment_summary"
+                fig_out.mkdir(parents=True, exist_ok=True)
+                for fname in produced:
+                    src = src_root / fname
+                    if src.is_file():
+                        # tag the mechanism into the filename
+                        tagged = fname.replace(stem, f"{stem}_{mech}")
+                        dst = fig_out / tagged
+                        try:
+                            shutil.copy2(src, dst)
+                            print(f"[copy] {src} -> {dst}")
+                        except Exception as e:
+                            print(f"[WARN] could not copy {src} -> {dst}: {e}")
+
 
 # ---------------------------------------------------------------- summary
 def final_summary(args: argparse.Namespace) -> None:
@@ -523,8 +549,10 @@ def final_summary(args: argparse.Namespace) -> None:
         print(f"  - {base}/{mech}/figures/heatmap_f1/...    (Per-class F1 heatmap, {m})")
         print(f"  - {base}/{mech}/figures/confusion_matrix/...  (last-round CMs, {m})")
         print(f"  - {base}/{mech}/figures/f1_by_round/...   (F1 vs rounds, {m})")
-    print(f"  - results/experiment_summary/acc_loss_*.png  (Fig 13 acc+loss "
-          "side-by-side, written by plot_experiment_results.py)")
+    for mech in args.mechanisms:
+        m = MECH_LABEL.get(mech, mech.upper())
+        print(f"  - {base}/{mech}/figures/experiment_summary/acc_loss_*_{mech}.png  "
+              f"(Fig 13 acc+loss side-by-side, {m})")
 
     print("\nTo paste into the paper:")
     print("  Section 5.6 table  -> ucihar_metrics_paper.tex (or .md)")
