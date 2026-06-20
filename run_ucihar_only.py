@@ -141,18 +141,63 @@ def apply_quick(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------- pre-flight
+def _ucihar_natural_path() -> Path:
+    """Where the official ZIP unzips to."""
+    return ROOT / "data" / "UCI HAR" / "UCI HAR Dataset"
+
+
+def _ucihar_generator_path() -> Path:
+    """Where data/UCI HAR/generate_niid_dirichlet.py expects to find it
+    (its loader hard-codes data_dir='./data', and we run it with
+    cwd=data/UCI HAR/, so that resolves to data/UCI HAR/data/...)."""
+    return ROOT / "data" / "UCI HAR" / "data" / "UCI HAR Dataset"
+
+
 def ucihar_raw_present() -> bool:
-    raw = ROOT / "data" / "UCI HAR" / "UCI HAR Dataset"
-    return (raw / "train").is_dir() and (raw / "test").is_dir()
+    """True iff at least one of the two expected layouts has train/+test/."""
+    for raw in (_ucihar_natural_path(), _ucihar_generator_path()):
+        if (raw / "train").is_dir() and (raw / "test").is_dir():
+            return True
+    return False
+
+
+def stage_ucihar_for_generator(dry: bool = False) -> None:
+    """Make sure the generator can see the dataset.
+
+    The official zip extracts to data/UCI HAR/UCI HAR Dataset/, but the
+    Dirichlet generator's loader looks at data/UCI HAR/data/UCI HAR
+    Dataset/. We bridge the two by symlinking (or copying as a fallback
+    on platforms that don't support symlinks)."""
+    src = _ucihar_natural_path()
+    dst = _ucihar_generator_path()
+    if (dst / "train").is_dir() and (dst / "test").is_dir():
+        return  # already in the generator-expected place
+    if not (src / "train").is_dir():
+        return  # nothing to stage
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dry:
+        print(f"[dry] would symlink {dst} -> {src}")
+        return
+    try:
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
+        os.symlink(src, dst, target_is_directory=True)
+        print(f"[stage] symlinked {dst} -> {src}")
+    except (OSError, NotImplementedError):
+        # Fall back to a hard copy on systems that don't support symlinks
+        # (e.g. Windows without dev-mode or admin).
+        shutil.copytree(src, dst)
+        print(f"[stage] copied {src} -> {dst} (symlink unavailable)")
 
 
 def maybe_download_ucihar(args: argparse.Namespace) -> None:
     if ucihar_raw_present():
+        stage_ucihar_for_generator(dry=args.dry_run)
         return
     if not args.auto_download:
         raise SystemExit(
             "\n[ERROR] UCI HAR raw archive not found at\n"
-            f"        {ROOT/'data/UCI HAR/UCI HAR Dataset'}\n"
+            f"        {_ucihar_natural_path()}\n"
             "        Either pass --auto_download (needs wget+unzip+internet) or\n"
             "        manually place the dataset there. The dataset is at:\n"
             "        https://archive.ics.uci.edu/ml/machine-learning-databases/00240/\n"
@@ -170,6 +215,7 @@ def maybe_download_ucihar(args: argparse.Namespace) -> None:
               "unzip -q 'UCI HAR Dataset.zip'"])
     if rc != 0 or not ucihar_raw_present():
         raise SystemExit("[ERROR] auto-download of UCI HAR failed; place it manually.")
+    stage_ucihar_for_generator(dry=args.dry_run)
 
 
 def ensure_dirichlet_split(args: argparse.Namespace) -> None:
