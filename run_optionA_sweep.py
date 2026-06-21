@@ -48,10 +48,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -63,7 +66,10 @@ OUT_ROOT = ROOT / "results" / "optionA"
 ALPHAS_DEFAULT = [0.1, 1.0, 10.0]
 MISSING_RATES_DEFAULT = [0.0, 0.10, 0.20]
 ALGOS_DEFAULT = ["FedAvg", "FedProx", "FedDistill", "FedEnsemble", "FedGen"]
-DATASETS_DEFAULT = ["EMnist-letters", "UCI HAR", "PAMAP2"]
+# Run order: UCI HAR (small, fastest sanity signal) -> EMNIST -> PAMAP2.
+# This is the order produced cells are created in. Stage-1 surfaces UCI
+# HAR first so any wiring break shows up within the first ~hour.
+DATASETS_DEFAULT = ["UCI HAR", "EMnist-letters", "PAMAP2"]
 SAMPLING_RATIO = 0.5
 N_USERS_TOTAL = 20
 
@@ -71,10 +77,299 @@ N_USERS_TOTAL = 20
 # EMNIST gets the FedGen paper's 200, real-data datasets get 100).
 ROUNDS = {"EMnist-letters": 200, "UCI HAR": 100, "PAMAP2": 100}
 
+# UCI HAR raw archive (the only one of the three that is not bundled with
+# torchvision and does not have a download helper inside the project).
+UCIHAR_URL = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
+              "00240/UCI%20HAR%20Dataset.zip")
+
 # Headline cell for imputer ablation + headline figures.
 HEADLINE_ALPHA = 1.0
 HEADLINE_MISS = 0.10
 ABLATION_IMPUTERS = ["amdae", "mean", "median", "zero", "none"]
+
+
+# ---------------------------------------------------------------- registry
+class MilestoneRegistry:
+    """Append-only success/failure log of every pipeline milestone.
+
+    Writes two files alongside the sweep results:
+
+      results/optionA/_status.md     human-readable, grouped by phase
+      results/optionA/_status.json   machine-readable, full record list
+
+    The Markdown file is rebuilt from the in-memory record list after
+    every log entry, so it is always up-to-date even mid-sweep -- you
+    can `tail` it from another shell while the sweep runs.
+
+    At the end of the run, call `summarise()` to print a final banner
+    saying "ALL <N> MILESTONES OK" or listing the failures.
+    """
+
+    PHASES_ORDER = [
+        "bootstrap",
+        "split_prep",
+        "main_sweep",
+        "imputer_ablation",
+        "paper_outputs",
+    ]
+    PHASES_LABEL = {
+        "bootstrap":        "Dataset bootstrap (download + extract raw data)",
+        "split_prep":       "Dirichlet split generation",
+        "main_sweep":       "Main sweep (per-cell, per-seed training)",
+        "imputer_ablation": "Imputer ablation (FedGen x 5 imputers)",
+        "paper_outputs":    "Paper outputs (tables + dashboards)",
+    }
+
+    def __init__(self, out_dir: Path, dry: bool = False) -> None:
+        self.dry = dry
+        self.records: list[dict] = []
+        self.out_dir = out_dir
+        self.md_path = out_dir / "_status.md"
+        self.json_path = out_dir / "_status.json"
+        self.summary_json_path = out_dir / "_status_summary.json"
+        self._t_start = time.time()
+        self._run_id = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H-%M-%SZ")
+        self._finished = False
+
+    def log(self, phase: str, item: str, status: str,
+            message: str = "", duration_s: Optional[float] = None) -> None:
+        """Record one milestone. status in {'PASS', 'FAIL', 'SKIP', 'INFO'}."""
+        rec = {
+            "phase": phase,
+            "item": item,
+            "status": status,
+            "message": message or "",
+            "duration_s": (round(float(duration_s), 1)
+                           if duration_s is not None else None),
+            "ts_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"),
+        }
+        self.records.append(rec)
+        # Always echo to stdout so users see milestones in the live log.
+        dur = (f" ({rec['duration_s']:.1f}s)"
+               if rec['duration_s'] is not None else "")
+        line = f"[{status}] {phase}/{item}{dur}"
+        if message:
+            line += f"  -- {message}"
+        print(line, flush=True)
+        # Always flush so users can `tail _status.md` while the sweep
+        # is running, even on a dry run (which is useful for previewing
+        # what milestones the registry will record).
+        self._flush()
+
+    def info(self, phase: str, item: str, message: str = "") -> None:
+        self.log(phase, item, "INFO", message)
+
+    def passed(self, phase: str, item: str, message: str = "",
+               duration_s: Optional[float] = None) -> None:
+        self.log(phase, item, "PASS", message, duration_s)
+
+    def failed(self, phase: str, item: str, message: str = "",
+               duration_s: Optional[float] = None) -> None:
+        self.log(phase, item, "FAIL", message, duration_s)
+
+    def skipped(self, phase: str, item: str, message: str = "") -> None:
+        self.log(phase, item, "SKIP", message)
+
+    def _build_summary(self) -> dict:
+        """Build the flat snapshot dict written to _status_summary.json.
+        Always reflects the current state (in-progress or finished)."""
+        # Per-phase rollup
+        phases: dict[str, dict] = {}
+        failures: list[dict] = []
+        for rec in self.records:
+            ph = rec["phase"]
+            slot = phases.setdefault(ph, {
+                "PASS": 0, "FAIL": 0, "SKIP": 0, "INFO": 0, "items": []
+            })
+            slot[rec["status"]] = slot.get(rec["status"], 0) + 1
+            slot["items"].append({
+                "item": rec["item"],
+                "status": rec["status"],
+                "message": rec["message"],
+                "duration_s": rec["duration_s"],
+                "ts_utc": rec["ts_utc"],
+            })
+            if rec["status"] == "FAIL":
+                failures.append({
+                    "phase": ph,
+                    "item": rec["item"],
+                    "message": rec["message"],
+                    "ts_utc": rec["ts_utc"],
+                })
+
+        n_pass = sum(1 for r in self.records if r["status"] == "PASS")
+        n_fail = sum(1 for r in self.records if r["status"] == "FAIL")
+        n_skip = sum(1 for r in self.records if r["status"] == "SKIP")
+        n_info = sum(1 for r in self.records if r["status"] == "INFO")
+
+        if not self.records:
+            verdict = "NOT_STARTED"
+        elif self._finished and n_fail == 0:
+            verdict = "ALL_OK"
+        elif self._finished and n_fail > 0:
+            verdict = "FAILURES_PRESENT"
+        elif n_fail == 0:
+            verdict = "IN_PROGRESS_HEALTHY"
+        else:
+            verdict = "IN_PROGRESS_WITH_FAILURES"
+
+        return {
+            "run_id": self._run_id,
+            "started_utc": self._run_id,
+            "last_update_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"),
+            "elapsed_s": round(time.time() - self._t_start, 1),
+            "finished": self._finished,
+            "verdict": verdict,
+            "totals": {
+                "TOTAL": len(self.records),
+                "PASS": n_pass,
+                "FAIL": n_fail,
+                "SKIP": n_skip,
+                "INFO": n_info,
+            },
+            "per_phase": {
+                ph: {k: phases[ph].get(k, 0)
+                     for k in ("PASS", "FAIL", "SKIP", "INFO")}
+                for ph in self.PHASES_ORDER if ph in phases
+            },
+            "failures": failures,
+            "phase_details": phases,
+        }
+
+    def _flush(self) -> None:
+        """Rewrite _status.md, _status.json (full record list), and
+        _status_summary.json (flat snapshot) from `self.records`."""
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.json_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "run_id": self._run_id,
+                    "started": self._run_id,
+                    "elapsed_s": round(time.time() - self._t_start, 1),
+                    "finished": self._finished,
+                    "records": self.records,
+                }, f, indent=2)
+            with open(self.summary_json_path, "w", encoding="utf-8") as f:
+                json.dump(self._build_summary(), f, indent=2)
+            self._write_md()
+        except OSError as exc:
+            print(f"[WARN] could not flush status registry: {exc}",
+                  file=sys.stderr)
+
+    def _write_md(self) -> None:
+        lines = [
+            f"# Option A sweep -- run status",
+            f"",
+            f"_Run ID: `{self._run_id}`_  ",
+            f"_Last update: "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}_  ",
+            f"_Elapsed: {time.time() - self._t_start:.0f}s_",
+            f"",
+        ]
+        # Per-phase grouping
+        by_phase: dict[str, list[dict]] = {p: [] for p in self.PHASES_ORDER}
+        for rec in self.records:
+            by_phase.setdefault(rec["phase"], []).append(rec)
+
+        for phase in self.PHASES_ORDER:
+            recs = by_phase.get(phase, [])
+            if not recs:
+                continue
+            n_pass = sum(1 for r in recs if r["status"] == "PASS")
+            n_fail = sum(1 for r in recs if r["status"] == "FAIL")
+            n_skip = sum(1 for r in recs if r["status"] == "SKIP")
+            n_info = sum(1 for r in recs if r["status"] == "INFO")
+            lines.append(f"## {self.PHASES_LABEL[phase]}")
+            lines.append(f"")
+            lines.append(f"PASS={n_pass}  FAIL={n_fail}  "
+                         f"SKIP={n_skip}  INFO={n_info}")
+            lines.append(f"")
+            for r in recs:
+                tick = {"PASS": "[PASS]", "FAIL": "[FAIL]",
+                        "SKIP": "[SKIP]", "INFO": "[INFO]"}.get(
+                            r["status"], "[----]")
+                dur = (f"  ({r['duration_s']:.1f}s)"
+                       if r["duration_s"] is not None else "")
+                msg = f"  -- {r['message']}" if r["message"] else ""
+                lines.append(f"- {tick} `{r['item']}`{dur}{msg}")
+            lines.append("")
+
+        # Summary footer
+        n_pass = sum(1 for r in self.records if r["status"] == "PASS")
+        n_fail = sum(1 for r in self.records if r["status"] == "FAIL")
+        n_skip = sum(1 for r in self.records if r["status"] == "SKIP")
+        verdict = ("ALL MILESTONES OK" if n_fail == 0
+                   else f"{n_fail} FAILURES")
+        lines += [
+            "## Summary",
+            "",
+            f"- Total milestones : {len(self.records)}",
+            f"- PASS             : {n_pass}",
+            f"- FAIL             : {n_fail}",
+            f"- SKIP             : {n_skip}",
+            f"",
+            f"### Verdict: **{verdict}**",
+            "",
+        ]
+        self.md_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def summarise(self) -> bool:
+        """Print the end-of-run banner. Returns True if every milestone
+        passed (or was deliberately skipped), False if any FAILED."""
+        # Mark the registry finished so the JSON verdict flips from
+        # IN_PROGRESS_* to ALL_OK / FAILURES_PRESENT, then re-flush so
+        # the on-disk files reflect the final state.
+        self._finished = True
+        self._flush()
+
+        n_pass = sum(1 for r in self.records if r["status"] == "PASS")
+        n_fail = sum(1 for r in self.records if r["status"] == "FAIL")
+        n_skip = sum(1 for r in self.records if r["status"] == "SKIP")
+        bar = "=" * 78
+        print(f"\n{bar}")
+        print("RUN STATUS SUMMARY")
+        print(bar)
+        # Per-phase rollup
+        by_phase: dict[str, list[dict]] = {p: [] for p in self.PHASES_ORDER}
+        for rec in self.records:
+            by_phase.setdefault(rec["phase"], []).append(rec)
+        for phase in self.PHASES_ORDER:
+            recs = by_phase.get(phase, [])
+            if not recs:
+                continue
+            p_pass = sum(1 for r in recs if r["status"] == "PASS")
+            p_fail = sum(1 for r in recs if r["status"] == "FAIL")
+            p_skip = sum(1 for r in recs if r["status"] == "SKIP")
+            label = self.PHASES_LABEL[phase][:48]
+            line = f"  {label:<48s}  PASS={p_pass:>3}  FAIL={p_fail:>3}"
+            if p_skip:
+                line += f"  SKIP={p_skip:>3}"
+            print(line)
+        print(bar)
+        if n_fail == 0:
+            print(f"  ALL MILESTONES OK  ({n_pass} PASS, "
+                  f"{n_skip} SKIP)")
+        else:
+            print(f"  {n_fail} FAILURE(S) -- see {self.md_path} for details")
+            print()
+            print("  Failures:")
+            for r in self.records:
+                if r["status"] == "FAIL":
+                    print(f"    - {r['phase']}/{r['item']}: "
+                          f"{r['message'] or '(no message)'}")
+        print(bar)
+        print(f"  Status report  : {self.md_path}")
+        print(f"  JSON record    : {self.json_path}")
+        print(f"  JSON summary   : {self.summary_json_path}")
+        print(bar)
+        return n_fail == 0
+
+
+# Module-level registry; populated in main() and consumed by every phase.
+REGISTRY: Optional[MilestoneRegistry] = None
 
 
 # ---------------------------------------------------------------- helpers
@@ -164,13 +459,102 @@ def stage_ucihar_for_generator(dry: bool = False) -> None:
         shutil.copytree(src, dst)
 
 
+def _download_ucihar_zip(zip_path: Path) -> None:
+    """Stream the official UCI HAR zip into `zip_path` using stdlib only
+    (no wget / unzip dependency). Cross-platform; works on Windows GPU
+    boxes too."""
+    import urllib.request
+    print(f"  downloading UCI HAR archive from\n    {UCIHAR_URL}\n  -> {zip_path}",
+          flush=True)
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(UCIHAR_URL, timeout=120) as resp, \
+         open(zip_path, "wb") as f:
+        shutil.copyfileobj(resp, f, length=1024 * 1024)
+    print(f"  download complete ({zip_path.stat().st_size / 1e6:.1f} MB)",
+          flush=True)
+
+
+def _ensure_ucihar_raw(args: argparse.Namespace) -> bool:
+    """If the UCI HAR raw extract is missing, download + unzip it via
+    stdlib (no wget/unzip required). Returns True on success or
+    already-present, False when auto-download is disabled and the data
+    is missing."""
+    import zipfile
+    t0 = time.time()
+    if (_ucihar_natural_path() / "train").is_dir():
+        if REGISTRY is not None:
+            REGISTRY.passed("bootstrap", "ucihar",
+                            "raw data already present (no download needed)")
+        return True
+
+    if not getattr(args, "auto_download", True):
+        msg = (f"raw data missing at {_ucihar_natural_path()} and "
+               f"--no_auto_download is set")
+        print(f"[ERROR] UCI HAR {msg}.\n"
+              f"        Manually download {UCIHAR_URL}\n"
+              f"        and unzip it into {_ucihar_natural_path().parent}/.",
+              file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("bootstrap", "ucihar", msg)
+        return False
+    if args.dry_run:
+        print(f"[dry] would auto-download + unzip UCI HAR archive into "
+              f"{_ucihar_natural_path().parent}/")
+        if REGISTRY is not None:
+            REGISTRY.info("bootstrap", "ucihar", "DRY RUN")
+        return True
+
+    target_dir = _ucihar_natural_path().parent  # data/UCI HAR/
+    zip_path = target_dir / "UCI HAR Dataset.zip"
+
+    try:
+        if not zip_path.exists():
+            _download_ucihar_zip(zip_path)
+        else:
+            print(f"  UCI HAR zip already present: {zip_path}")
+        print(f"  unzipping into {target_dir} ...")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(target_dir)
+    except Exception as exc:
+        msg = f"download/unzip failed: {exc}"
+        print(f"[ERROR] UCI HAR auto-download / unzip failed: {exc}\n"
+              f"        Manually fetch {UCIHAR_URL}\n"
+              f"        and unzip into {target_dir}/.",
+              file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("bootstrap", "ucihar", msg, time.time() - t0)
+        return False
+
+    if not (_ucihar_natural_path() / "train").is_dir():
+        msg = f"expected dir {_ucihar_natural_path()}/train missing after unzip"
+        print(f"[ERROR] After unzip, expected layout is missing:\n"
+              f"        {_ucihar_natural_path()}/train was not created.\n"
+              f"        Inspect {target_dir} contents.",
+              file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("bootstrap", "ucihar", msg, time.time() - t0)
+        return False
+    print(f"  UCI HAR raw ready at {_ucihar_natural_path()}")
+    if REGISTRY is not None:
+        size_mb = (zip_path.stat().st_size / 1e6) if zip_path.exists() else 0
+        REGISTRY.passed("bootstrap", "ucihar",
+                        f"download + unzip complete ({size_mb:.1f} MB zip)",
+                        time.time() - t0)
+    return True
+
+
 def ensure_split(args: argparse.Namespace, dataset: str, alpha: float) -> bool:
     """Generate the per-(dataset, alpha) Dirichlet split if missing.
     Returns True on success (or already-present), False on generator failure."""
     split_dir = dataset_split_dir(dataset, alpha)
+    item = f"{dataset_short(dataset)}_alpha{alpha}"
     if (split_dir / "train").is_dir() and (split_dir / "test").is_dir():
         print(f"[ok] split present: {split_dir}")
+        if REGISTRY is not None:
+            REGISTRY.passed("split_prep", item, "already present")
         return True
+
+    t0 = time.time()
 
     if dataset == "EMnist-letters":
         gen = ROOT / "data" / "EMnist" / "generate_niid_dirichlet.py"
@@ -181,12 +565,7 @@ def ensure_split(args: argparse.Namespace, dataset: str, alpha: float) -> bool:
                "--sampling_ratio", str(SAMPLING_RATIO),
                "--split", "letters"]
     elif dataset == "UCI HAR":
-        if not _ucihar_natural_path().is_dir() and not args.dry_run:
-            print(f"[ERROR] UCI HAR raw data not found at "
-                  f"{_ucihar_natural_path()}. Download from "
-                  "https://archive.ics.uci.edu/ml/machine-learning-databases/"
-                  "00240/UCI%20HAR%20Dataset.zip and unzip into "
-                  "data/UCI HAR/.")
+        if not _ensure_ucihar_raw(args):
             return False
         stage_ucihar_for_generator(dry=args.dry_run)
         gen = ROOT / "data" / "UCI HAR" / "generate_niid_dirichlet.py"
@@ -208,9 +587,18 @@ def ensure_split(args: argparse.Namespace, dataset: str, alpha: float) -> bool:
         raise ValueError(f"Unknown dataset: {dataset}")
 
     rc = run(cmd, dry=args.dry_run, cwd=cwd, allow_fail=True)
+    dt = time.time() - t0
     if rc != 0 and not args.dry_run:
         print(f"[ERROR] data-prep failed for {dataset} alpha={alpha} (rc={rc})")
+        if REGISTRY is not None:
+            REGISTRY.failed("split_prep", item,
+                            f"generator exited rc={rc}", dt)
         return False
+    if REGISTRY is not None and not args.dry_run:
+        REGISTRY.passed("split_prep", item,
+                        f"generated at {split_dir.name}", dt)
+    elif REGISTRY is not None and args.dry_run:
+        REGISTRY.info("split_prep", item, "DRY RUN")
     return True
 
 
@@ -298,13 +686,25 @@ def train_cell(args: argparse.Namespace, dataset: str, alpha: float,
     for d in (models_dir, metrics_dir):
         d.mkdir(parents=True, exist_ok=True)
 
+    # Phase tag is "imputer_ablation" for ablation cells, "main_sweep"
+    # otherwise (cell_suffix encodes this).
+    phase = ("imputer_ablation" if cell_suffix.startswith("imputer_ablation")
+             else "main_sweep")
+
     todo_seeds = [s for s in range(seeds_wanted)
                   if not expected_h5(args, dataset, alpha, algo,
                                      s, models_dir).exists()]
+    cell_id_base = (f"{dataset_short(dataset)}_alpha{alpha}_miss{miss}_{algo}"
+                    + (f"_{cell_suffix.replace('/', '_')}"
+                       if cell_suffix else ""))
     if not todo_seeds:
         print(f"[skip] {dataset_short(dataset):>6} a={alpha} m={miss} "
               f"{algo:>11s}{(' (' + cell_suffix + ')') if cell_suffix else ''} "
               f"-- all {seeds_wanted} seed(s) already trained")
+        if REGISTRY is not None:
+            for s in range(seeds_wanted):
+                REGISTRY.passed(phase, f"{cell_id_base}_seed{s}",
+                                "already trained (resume-skip)")
         return
 
     rounds = ROUNDS[dataset]
@@ -312,6 +712,9 @@ def train_cell(args: argparse.Namespace, dataset: str, alpha: float,
 
     for s in todo_seeds:
         if not args.dry_run and not _check_no_stale_metrics():
+            if REGISTRY is not None:
+                REGISTRY.failed(phase, f"{cell_id_base}_seed{s}",
+                                "stale results/metrics from previous crash")
             return
 
         cmd = [PY, "main.py",
@@ -332,10 +735,36 @@ def train_cell(args: argparse.Namespace, dataset: str, alpha: float,
         if force_imputer:
             cmd += ["--force_imputer", force_imputer]
 
+        t0 = time.time()
         rc = run(cmd, dry=args.dry_run, allow_fail=True)
+        dt = time.time() - t0
+
+        # Confirm the expected output file actually appeared. A spurious
+        # rc=0 without an HDF5 (e.g. process aborted before save_results)
+        # is treated as a failure for paper-status purposes.
+        h5 = expected_h5(args, dataset, alpha, algo, s, models_dir)
+        produced = (args.dry_run or h5.exists())
+        item_id = f"{cell_id_base}_seed{s}"
+
         if rc != 0:
             print(f"[WARN] training failed: {dataset} a={alpha} m={miss} "
                   f"{algo} seed={s} (rc={rc})", file=sys.stderr)
+            if REGISTRY is not None:
+                REGISTRY.failed(phase, item_id,
+                                f"main.py exited rc={rc}", dt)
+        elif not produced:
+            if REGISTRY is not None:
+                REGISTRY.failed(phase, item_id,
+                                f"rc=0 but expected HDF5 missing: {h5.name}",
+                                dt)
+        else:
+            if REGISTRY is not None:
+                if args.dry_run:
+                    REGISTRY.info(phase, item_id, "DRY RUN")
+                else:
+                    REGISTRY.passed(phase, item_id,
+                                    f"trained, summary={h5.name}", dt)
+
         # Whether the training failed or not, relocate any per-round dumps
         # so they don't pollute the next cell.
         _relocate_per_round_metrics(args, metrics_dir, s)
@@ -360,6 +789,57 @@ def phase_main_sweep(args: argparse.Namespace) -> None:
                     train_cell(args, dataset, alpha, miss, algo,
                                seeds_wanted=seeds_wanted,
                                force_imputer=args.force_imputer)
+
+
+def phase_paper_outputs(args: argparse.Namespace) -> None:
+    """Run paper_table_optionA.py + paper_dashboard.py to materialise the
+    7 tables and 4 dashboard PNGs. Both scripts are smoke-test-safe -- they
+    render placeholder cells when seeds are missing."""
+    banner("PAPER OUTPUTS  (tables + dashboards)")
+
+    table_cmd = [PY, "paper_table_optionA.py",
+                 "--input-root", str(OUT_ROOT),
+                 "--output-dir", str(OUT_ROOT / "tables"),
+                 "--metric", "all",
+                 "--imputer_ablation"]
+    t0 = time.time()
+    rc = run(table_cmd, dry=args.dry_run, allow_fail=True)
+    dt = time.time() - t0
+    if args.dry_run:
+        if REGISTRY is not None:
+            REGISTRY.info("paper_outputs", "paper_table_optionA", "DRY RUN")
+    elif rc != 0:
+        print("[WARN] paper_table_optionA.py failed (rc={}); see log."
+              .format(rc), file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("paper_outputs", "paper_table_optionA",
+                            f"rc={rc}", dt)
+    else:
+        if REGISTRY is not None:
+            REGISTRY.passed("paper_outputs", "paper_table_optionA",
+                            f"7 tables -> {OUT_ROOT / 'tables'}", dt)
+
+    dash_cmd = [PY, "paper_dashboard.py",
+                "--input-root", str(OUT_ROOT),
+                "--output-dir", str(OUT_ROOT / "dashboards"),
+                "--headline-alpha", "1.0",
+                "--headline-missing", "0.10"]
+    t0 = time.time()
+    rc = run(dash_cmd, dry=args.dry_run, allow_fail=True)
+    dt = time.time() - t0
+    if args.dry_run:
+        if REGISTRY is not None:
+            REGISTRY.info("paper_outputs", "paper_dashboard", "DRY RUN")
+    elif rc != 0:
+        print("[WARN] paper_dashboard.py failed (rc={}); see log."
+              .format(rc), file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("paper_outputs", "paper_dashboard",
+                            f"rc={rc}", dt)
+    else:
+        if REGISTRY is not None:
+            REGISTRY.passed("paper_outputs", "paper_dashboard",
+                            f"4 figures -> {OUT_ROOT / 'dashboards'}", dt)
 
 
 def phase_imputer_ablation(args: argparse.Namespace) -> None:
@@ -430,6 +910,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ablation", action="store_true",
                    help="Run ONLY the imputer-ablation phase "
                         "(FedGen x 5 imputers at headline cell).")
+    p.add_argument("--full_pipeline", action="store_true",
+                   help="One-shot: run main sweep (Stage 2 semantics, "
+                        "--times seeds per cell), then imputer ablation, "
+                        "then build paper tables + dashboards. Equivalent "
+                        "to running --stage 2, then --ablation, then "
+                        "paper_table_optionA.py, then paper_dashboard.py "
+                        "back-to-back. Default --times is 3 (multi-seed); "
+                        "pass --times 1 for a single-seed sanity pass.")
 
     # Override the imputer for the main sweep. By default we hard-force
     # 'amdae' so every "FedGen-AMDAE" row is reviewer-bulletproof.
@@ -441,10 +929,19 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--dry_run", action="store_true",
                    help="Print every command without executing.")
+    p.add_argument("--no_auto_download", dest="auto_download",
+                   action="store_false",
+                   help="Disable automatic download of raw datasets when "
+                        "they are missing. EMNIST + PAMAP2 are auto-fetched "
+                        "by their data-prep helpers; UCI HAR is auto-fetched "
+                        "by this driver. Use this flag to disable UCI HAR "
+                        "auto-download (e.g. on a no-internet GPU box).")
+    p.set_defaults(auto_download=True)
     return p.parse_args()
 
 
 def main() -> None:
+    global REGISTRY
     args = parse_args()
 
     # Translate 'auto' to None so main.py's --force_imputer arg is omitted.
@@ -462,6 +959,11 @@ def main() -> None:
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
+    # Initialise the milestone registry. Every PASS / FAIL through the
+    # sweep is appended to results/optionA/_status.{md,json} so the user
+    # can confirm at a glance whether everything finished cleanly.
+    REGISTRY = MilestoneRegistry(OUT_ROOT, dry=args.dry_run)
+
     banner(
         f"FedGen-AMDAE  ::  Option A sweep  "
         f"({'DRY RUN' if args.dry_run else 'LIVE'})\n"
@@ -476,26 +978,43 @@ def main() -> None:
         f"  times (seeds)    = {args.times}\n"
         f"  stage            = {args.stage}\n"
         f"  ablation only?   = {args.ablation}\n"
+        f"  full_pipeline?   = {args.full_pipeline}\n"
         f"  force_imputer    = {args.force_imputer or '(auto)'}\n"
         f"  device           = {args.device}\n"
+        f"  auto_download    = {args.auto_download}\n"
         f"  out_root         = {OUT_ROOT}"
     )
 
-    if args.ablation:
+    if args.full_pipeline:
+        # Stage 2 semantics + ablation + paper outputs, all in one go.
+        args.stage = 2
+        phase_main_sweep(args)
+        phase_imputer_ablation(args)
+        phase_paper_outputs(args)
+    elif args.ablation:
         phase_imputer_ablation(args)
     else:
         phase_main_sweep(args)
 
     banner("DONE  Option A sweep")
     print(f"\nResults under: {OUT_ROOT}")
-    print("Next steps:")
-    print("  python paper_table_optionA.py --input-root results/optionA "
-          "--metric Accuracy")
-    print("  python paper_table_optionA.py --input-root results/optionA "
-          "--metric MacroF1")
-    print("  python paper_table_optionA.py --input-root results/optionA "
-          "--imputer_ablation")
-    print("  python paper_dashboard.py     --input-root results/optionA")
+    if args.full_pipeline:
+        print(f"Tables       : {OUT_ROOT / 'tables'}")
+        print(f"Dashboards   : {OUT_ROOT / 'dashboards'}")
+    else:
+        print("Next steps (build paper tables + dashboards):")
+        print("  python paper_table_optionA.py --metric all --imputer_ablation")
+        print("  python paper_dashboard.py     --headline-alpha 1 "
+              "--headline-missing 0.10")
+        print("Or skip these and re-run with --full_pipeline to chain "
+              "everything in one command.")
+
+    # Final milestone summary -- single source of truth for "did everything
+    # finish?". Exits 0 on success, 1 if any milestone FAILed so wrapping
+    # shell scripts / CI can pick it up via $?.
+    all_ok = REGISTRY.summarise()
+    if not all_ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

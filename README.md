@@ -653,7 +653,7 @@ figures. If you only want to run one thing, run the commands below.
 
 | Axis | Values |
 |------|--------|
-| Datasets | `EMnist-letters`, `UCI HAR`, `PAMAP2` |
+| Datasets (run order) | `UCI HAR` -> `EMnist-letters` -> `PAMAP2` |
 | Heterogeneity (alpha) | `0.1`, `1`, `10` |
 | Missing rate | `0.0`, `0.10`, `0.20` (0% = no-missingness anchor) |
 | Mechanism | MCAR (random) only |
@@ -668,7 +668,26 @@ Total trainings (across both stages and ablation): ~135 (Stage 1) +
 incremental (Stage 2 only adds the missing seeds) + 45 (ablation).
 Wall-clock on a single GPU: ~62-86 GPU-h, ~3-4 days with monitoring.
 
-### 11.2 New scripts
+### 11.2 Auto-download
+
+All three datasets self-bootstrap on first call -- you do not need to
+download anything manually:
+
+* **UCI HAR** (~60 MB) -- `run_optionA_sweep.py` itself fetches and
+  unzips `https://archive.ics.uci.edu/ml/.../UCI HAR Dataset.zip` via
+  Python stdlib (`urllib` + `zipfile`); no `wget` / `unzip` required, so
+  it works on Linux, macOS, and Windows. Pass `--no_auto_download` to
+  disable on no-internet boxes.
+* **EMNIST-letters** (~562 MB) -- `data/EMnist/generate_niid_dirichlet.py`
+  uses `torchvision.datasets.EMNIST(download=True)`.
+* **PAMAP2** (~700 MB zipped / ~3 GB unzipped) --
+  `goal2_real_dataset_experiment.py --prepare_only` downloads + unzips
+  via `urllib`.
+
+All three are idempotent (skip download if already present) and the
+splits are reused across alphas where possible.
+
+### 11.3 New scripts
 
 * `run_optionA_sweep.py` -- master driver. Drives Dirichlet split
   generation, per-cell training (with per-seed resume-skip), and the
@@ -684,7 +703,7 @@ These three scripts read every cell from
 `results/optionA/<dataset>/alpha<a>_miss<m>/<algo>/{models,metrics}/`
 which is the namespacing the driver uses.
 
-### 11.3 Recommended runbook
+### 11.4 Recommended runbook
 
 Designed to be safe to interrupt and resume at any time -- everything is
 per-cell, per-seed skip-resumable.
@@ -741,7 +760,7 @@ python run_optionA_sweep.py --ablation --device cuda \
        --datasets "UCI HAR" --times 3
 ```
 
-### 11.4 Output layout
+### 11.5 Output layout
 
 ```
 results/optionA/
@@ -770,7 +789,7 @@ results/optionA/
    └─ hero_figure.png                  # 4 rows (panel types) x 3 cols (datasets)
 ```
 
-### 11.5 Resume / skip behaviour
+### 11.6 Resume / skip behaviour
 
 * Per-cell, per-seed: the driver inspects the expected
   `<TOKEN>_<algo>_..._<seed>.h5` filename for each seed and skips any
@@ -784,7 +803,7 @@ results/optionA/
   HDF5 dumps). Move it aside (e.g. `mv results/metrics _stale`) and
   re-run.
 
-### 11.6 What was deliberately removed
+### 11.7 What was deliberately removed
 
 * MAR / MNAR mechanism sweeps. The code path stays in place
   (`utils/data_imputation.py::_mar_missing` / `_mnar_missing`) for future
@@ -792,7 +811,7 @@ results/optionA/
   on UCI HAR is parked in `results/_archive_mechanisms/`.
 * MNIST. EMNIST-letters is the synthetic anchor.
 
-### 11.7 force_imputer guarantee
+### 11.8 force_imputer guarantee
 
 Every "FedGen-AMDAE" row in the main tables is reviewer-bulletproof: the
 driver passes `--force_imputer amdae` to `main.py`, which forces
