@@ -15,6 +15,7 @@ class FedDistill(Server):
             data,
             missing_rate=args.missing_rate,
             missing_pattern=getattr(args, 'missing_pattern', 'random'),
+            force_imputer=getattr(args, 'force_imputer', None),
         )
         # data contains: clients, groups, train_data, test_data, proxy_data
         clients = data[0]

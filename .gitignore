@@ -4,9 +4,8 @@ fedgen_env/
 fedamd/
 
 data/EMnist/data
-data/EMnist/u20-letters-alpha0.1-ratio0.1
-data/EMnist/u20-letters-alpha1.0-ratio0.1
-data/EMnist/u20-letters-alpha10.0-ratio0.1
+# Dirichlet split outputs (any alpha / ratio combo)
+data/EMnist/u20-letters-*
 
 #celeba dataset
 data/CelebA/leaf
@@ -150,6 +149,10 @@ dmypy.json
 # Large datasets and models
 data/UCI HAR/*
 !data/UCI HAR/generate_niid_dirichlet.py
+data/PAMAP2/
 results/models/
 models/
 results/
+
+# PDFs and other large research files
+*.pdf

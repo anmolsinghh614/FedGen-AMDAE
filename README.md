@@ -29,9 +29,10 @@ FedEnsemble on Mnist, EMnist, UCI HAR, and (optionally) PAMAP2.
 8. [Paper-pipeline scripts (Goal 1 / 2 / 3)](#8-paper-pipeline-scripts-goal-1--2--3)
 9. [One-shot orchestrator (`run_paper_pipeline.py`)](#9-one-shot-orchestrator-run_paper_pipelinepy)
 10. [Tables, plots, and metrics tooling](#10-tables-plots-and-metrics-tooling)
-11. [Outputs you will get](#11-outputs-you-will-get)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Citing this work](#13-citing-this-work)
+11. [Option A paper sweep (run this for the paper)](#11-option-a-paper-sweep-run-this-for-the-paper)
+12. [Outputs you will get](#12-outputs-you-will-get)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Citing this work](#14-citing-this-work)
 
 ---
 
@@ -640,7 +641,175 @@ See [Section 8](#goal-3--f1--precision--recall-paper-tables).
 
 ---
 
-## 11. Outputs you will get
+## 11. Option A paper sweep (run this for the paper)
+
+Section 11 is the **single source of truth** for reproducing the paper's
+headline numbers. It runs a clean, mechanism-free (MCAR-only) sweep across
+EMNIST-letters, UCI HAR, and PAMAP2 with the alpha and missing-rate grid
+used in our previous paper, then emits the 7 paper tables and 4 dashboard
+figures. If you only want to run one thing, run the commands below.
+
+### 11.1 Locked grid
+
+| Axis | Values |
+|------|--------|
+| Datasets | `EMnist-letters`, `UCI HAR`, `PAMAP2` |
+| Heterogeneity (alpha) | `0.1`, `1`, `10` |
+| Missing rate | `0.0`, `0.10`, `0.20` (0% = no-missingness anchor) |
+| Mechanism | MCAR (random) only |
+| Algorithms | FedAvg, FedProx, FedDistill, FedEnsemble, FedGen |
+| Imputer (main sweep) | AM-DAE, **forced** via `--force_imputer amdae` |
+| Imputer (ablation) | FedGen x {AM-DAE, Mean, Median, Zero, no-imputation} |
+| Headline cell (figures + ablation) | alpha=1, missing=10% |
+| Communication rounds | EMNIST 200, UCI HAR 100, PAMAP2 100 |
+| Seeds | Stage 1 = 1; Stage 2 = `--times 3` |
+
+Total trainings (across both stages and ablation): ~135 (Stage 1) +
+incremental (Stage 2 only adds the missing seeds) + 45 (ablation).
+Wall-clock on a single GPU: ~62-86 GPU-h, ~3-4 days with monitoring.
+
+### 11.2 New scripts
+
+* `run_optionA_sweep.py` -- master driver. Drives Dirichlet split
+  generation, per-cell training (with per-seed resume-skip), and the
+  imputer ablation phase.
+* `paper_table_optionA.py` -- builds the 6 main paper tables (Accuracy
+  and Macro-F1 on EMNIST / UCI HAR / PAMAP2) and the 1 imputer ablation
+  table, in CSV + Markdown + LaTeX, with the row winner bolded.
+* `paper_dashboard.py` -- composes the 3 per-dataset 2x3 dashboards
+  (`<dataset>_dashboard.png`) and the 4x3 hero figure
+  (`hero_figure.png`).
+
+These three scripts read every cell from
+`results/optionA/<dataset>/alpha<a>_miss<m>/<algo>/{models,metrics}/`
+which is the namespacing the driver uses.
+
+### 11.3 Recommended runbook
+
+Designed to be safe to interrupt and resume at any time -- everything is
+per-cell, per-seed skip-resumable.
+
+```bash
+# 0. (One-off, no GPU) Pre-flight: verify the driver builds the right
+#    commands for the full grid before committing GPU time.
+python run_optionA_sweep.py --dry_run --stage 1
+
+# 1. Stage 1 -- single seed across the full 3 x 3 x 3 x 5 = 135-cell grid.
+#    ~22-30 GPU-h on a single GPU. Run inside tmux / screen with logging.
+tmux new -s optionA_stage1
+python run_optionA_sweep.py --stage 1 --device cuda \
+       2>&1 | tee logs/optionA_stage1.log
+
+# 2. Triage Stage 1 results. Build the seed-1 tables and smell-test:
+#    does FedGen win most rows? Did anything explode (NaN, < 50% accuracy
+#    where it shouldn't be, training-loss divergence)?
+python paper_table_optionA.py --metric all
+grep -E "BEST PERFORMING METHOD|Selected method" logs/optionA_stage1.log \
+     | sort -u
+
+# 3. Stage 2 -- multi-seed (`--times 3` total). The driver re-runs only
+#    the seeds that are missing for each cell, so seed 0 is NOT
+#    retrained. ~40-60 GPU-h.
+python run_optionA_sweep.py --stage 2 --device cuda --times 3 \
+       2>&1 | tee logs/optionA_stage2.log
+
+# 4. Imputer ablation -- FedGen x {amdae,mean,median,zero,none} at the
+#    headline cell (alpha=1, miss=10%) for each dataset, --times 3.
+#    ~6-8 GPU-h.
+python run_optionA_sweep.py --ablation --device cuda --times 3 \
+       2>&1 | tee logs/optionA_ablation.log
+
+# 5. Final paper outputs (no GPU; ~1-2 minutes).
+python paper_table_optionA.py --metric all --imputer_ablation
+python paper_dashboard.py --headline-alpha 1 --headline-missing 0.10
+```
+
+**Subset / smoke-test variants**, useful while iterating or to do a
+sanity run on a CPU box first:
+
+```bash
+# Just one dataset, one alpha, fewer rounds
+python run_optionA_sweep.py --stage 1 --device cuda \
+       --datasets EMnist-letters --alphas 0.1 \
+       --num_glob_iters_emnist 5 --algorithms FedGen FedAvg
+
+# Re-run only one algorithm across the full grid
+python run_optionA_sweep.py --stage 1 --device cuda --algorithms FedGen
+
+# Ablation only on UCI HAR (e.g. for a fast sanity pass)
+python run_optionA_sweep.py --ablation --device cuda \
+       --datasets "UCI HAR" --times 3
+```
+
+### 11.4 Output layout
+
+```
+results/optionA/
+├─ <dataset>/                          # emnist | ucihar | pamap2
+│  ├─ alpha0.1_miss0.0/<algo>/
+│  │  ├─ models/<TOKEN>_<algo>_..._<seed>.h5
+│  │  └─ metrics/seed_<s>/<TOKEN>/<algo>_<TOKEN>_round_<R>.h5
+│  ├─ alpha0.1_miss0.1/<algo>/...
+│  ├─ alpha0.1_miss0.2/<algo>/...
+│  ├─ alpha1.0_miss0.0/<algo>/...
+│  ├─ ...                              # (3 x 3 alpha x miss combinations)
+│  └─ alpha1.0_miss0.1/FedGen/imputer_ablation/<imputer>/{models,metrics}/
+│                                      # ablation cells live as a sub-bucket
+├─ tables/
+│  ├─ accuracy_emnist.{csv,md,tex}     # 3 datasets x 2 metrics = 6 tables
+│  ├─ accuracy_ucihar.{csv,md,tex}
+│  ├─ accuracy_pamap2.{csv,md,tex}
+│  ├─ macro_f1_emnist.{csv,md,tex}
+│  ├─ macro_f1_ucihar.{csv,md,tex}
+│  ├─ macro_f1_pamap2.{csv,md,tex}
+│  └─ imputer_ablation.{csv,md,tex}    # FedGen x 5 imputers x 3 datasets
+└─ dashboards/
+   ├─ emnist_dashboard.png             # 2x3 panels per dataset
+   ├─ ucihar_dashboard.png
+   ├─ pamap2_dashboard.png
+   └─ hero_figure.png                  # 4 rows (panel types) x 3 cols (datasets)
+```
+
+### 11.5 Resume / skip behaviour
+
+* Per-cell, per-seed: the driver inspects the expected
+  `<TOKEN>_<algo>_..._<seed>.h5` filename for each seed and skips any
+  seed whose summary file already exists.
+* Per-round metrics dumps are namespaced under
+  `metrics/seed_<s>/<TOKEN>/` so multi-seed runs do **not** overwrite
+  each other (the per-round HDF5 filename does not include the seed,
+  hence the per-seed sub-folder).
+* If `results/metrics/` is left over from a previous crash, the driver
+  refuses to start (to avoid mis-attributing somebody else's per-round
+  HDF5 dumps). Move it aside (e.g. `mv results/metrics _stale`) and
+  re-run.
+
+### 11.6 What was deliberately removed
+
+* MAR / MNAR mechanism sweeps. The code path stays in place
+  (`utils/data_imputation.py::_mar_missing` / `_mnar_missing`) for future
+  work, but it is **not part of this sweep**. The previous mechanism work
+  on UCI HAR is parked in `results/_archive_mechanisms/`.
+* MNIST. EMNIST-letters is the synthetic anchor.
+
+### 11.7 force_imputer guarantee
+
+Every "FedGen-AMDAE" row in the main tables is reviewer-bulletproof: the
+driver passes `--force_imputer amdae` to `main.py`, which forces
+`apply_amdae_imputation` to use AM-DAE unconditionally (bypassing the
+composite-score auto-selection). The composite-score selection is still
+correct and would still pick AM-DAE under `RELIABLE_METRICS`, but the
+explicit force makes it impossible for a reviewer to argue the headline
+numbers were silently produced by Mean / Median / Zero imputation.
+
+The imputer-ablation table runs FedGen at the headline cell with each
+of `{amdae, mean, median, zero, none}` so the paper can quantify how
+much AM-DAE actually buys vs. simpler imputers and the no-imputation
+baseline.
+
+---
+
+## 12. Outputs you will get
 
 ```
 results/
@@ -680,7 +849,7 @@ results/
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 **"Dataset not recognized"** — the dataset token must match the
 `get_data_dir()` patterns in `utils/model_utils.py`. Make sure the
@@ -718,7 +887,7 @@ the generator. There is no automatic download for HAR.
 
 ---
 
-## 13. Citing this work
+## 14. Citing this work
 
 If you use this codebase, please cite:
 

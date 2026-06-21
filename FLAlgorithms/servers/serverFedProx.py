@@ -18,6 +18,7 @@ class FedProx(Server):
             data,
             missing_rate=args.missing_rate,
             missing_pattern=getattr(args, 'missing_pattern', 'random'),
+            force_imputer=getattr(args, 'force_imputer', None),
         )
         total_users = len(data[0])
         print("Users in total: {}".format(total_users))

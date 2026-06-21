@@ -24,6 +24,7 @@ class FedGen(Server):
             data,
             missing_rate=args.missing_rate,
             missing_pattern=getattr(args, 'missing_pattern', 'random'),
+            force_imputer=getattr(args, 'force_imputer', None),
         )
         clients = data[0]
         total_users = len(clients)

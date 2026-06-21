@@ -38,7 +38,7 @@ def run_job(args, i):
         server.test()
 
 def main(args):
-    for i in range(args.times):
+    for i in range(args.seed_start, args.seed_start + args.times):
         run_job(args, i)
     print("Finished training.")
 
@@ -63,6 +63,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_users", type=int, default=20, help="Number of Users per round")
     parser.add_argument("--K", type=int, default=1, help="Computation steps")
     parser.add_argument("--times", type=int, default=3, help="running time")
+    parser.add_argument("--seed_start", type=int, default=0,
+                        help="Index of the first seed to run (default 0). "
+                             "Combined with --times: runs seeds "
+                             "[seed_start, seed_start + times). "
+                             "Use this to drive individual seeds in "
+                             "resumable sweeps (e.g. seed_start=2 times=1 "
+                             "runs only seed 2 without redoing seeds 0/1).")
     parser.add_argument("--device", type=str, default="cuda", choices=["cpu","cuda"], help="run device (cpu | cuda)")
     parser.add_argument("--result_path", type=str, default="results/models", help="directory path to save results")
     parser.add_argument("--missing_rate", type=float, default=0.1, help="Missing data ratio for AMDAE imputation (0.0-1.0)")
@@ -71,6 +78,15 @@ if __name__ == "__main__":
                         help="Missing-data mechanism used by MissingDataSimulator: "
                              "random/mcar (default, paper Eq.1), mar (label-conditional), "
                              "mnar (magnitude-conditional), fixed_intervals, continuous_periods.")
+    parser.add_argument("--force_imputer", type=str, default=None,
+                        choices=["amdae", "mean", "median", "zero", "none", None],
+                        help="Bypass composite-score selection and force a specific imputer. "
+                             "'amdae' guarantees AM-DAE imputed data (use for the headline runs); "
+                             "'mean'/'median'/'zero' force the corresponding baseline imputer; "
+                             "'none' simulates missingness but skips imputation entirely "
+                             "(missing positions stay zero; for the no-imputation ablation row). "
+                             "Default None lets the patched composite pick the winner "
+                             "(typically AM-DAE under RELIABLE_METRICS).")
 
     args = parser.parse_args()
     """
@@ -97,5 +113,8 @@ if __name__ == "__main__":
     print("Dataset       : {}".format(args.dataset))
     print("Local Model       : {}".format(args.model))
     print("Device            : {}".format(args.device))
+    print("Missing rate      : {}".format(args.missing_rate))
+    print("Missing pattern   : {}".format(args.missing_pattern))
+    print("Force imputer     : {}".format(args.force_imputer))
     print("=" * 80)
     main(args)

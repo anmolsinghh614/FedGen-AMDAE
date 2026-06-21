@@ -725,14 +725,25 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
     """Apply imputation to a federated-data tuple.
 
     Args (selected):
-        force_imputer: If set to one of {'AMDAE', 'Mean Imputation',
-            'Median Imputation', 'Zero Imputation'} (case-insensitive,
-            ``'amdae'`` is also accepted), the composite-score winner
-            selection is bypassed and the named imputer is used unconditionally.
-            All four imputers still run so the comparison plot is unchanged.
-            Use this when the paper claims to use a specific imputer
-            (e.g. ``force_imputer='amdae'`` to guarantee FedGen-AMDAE numbers
-            were truly trained on AM-DAE-imputed data).
+        force_imputer: If set, bypass composite-score selection and use the
+            named imputer unconditionally. Recognised values:
+
+              * ``'amdae'`` / ``'AMDAE'`` -- force AM-DAE; guarantees
+                FedGen-AMDAE numbers were truly trained on AM-DAE-imputed
+                data. All four imputers still run so the comparison plot
+                is unchanged.
+              * ``'mean'`` / ``'Mean Imputation'``    -- force Mean
+              * ``'median'`` / ``'Median Imputation'`` -- force Median
+              * ``'zero'`` / ``'Zero Imputation'``    -- force Zero
+              * ``'none'`` -- the "no-imputation" ablation baseline:
+                missingness is still simulated, but no imputer runs and
+                the missing positions are simply zero-filled to keep the
+                data trainable. This is the honest "no imputation
+                technique was applied" row the imputer ablation table
+                needs.
+
+            Default ``None`` lets the patched composite (RELIABLE_METRICS)
+            pick the winner, which under standardised data is AM-DAE.
     """
     
     print(f"Starting Enhanced AM-DAE imputation with {missing_rate*100}% missing data...")
@@ -763,7 +774,24 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
         missing_pattern,
         **sim_kwargs,
     )
-    
+
+    # Special case: force_imputer='none' is the "no-imputation" ablation
+    # baseline. Skip the 4-imputer pipeline entirely (saves ~30-60s per
+    # call) and just zero-fill missing positions so the data is trainable.
+    # This is conceptually different from the 'zero' force_imputer: that
+    # one runs the full pipeline and selects ZeroImputer; this one bypasses
+    # all imputation reasoning, making it the honest "no imputation
+    # technique was applied" baseline that reviewers ask for.
+    if force_imputer is not None and str(force_imputer).lower() == 'none':
+        print("\n>> NO-IMPUTATION baseline (force_imputer='none'): "
+              "zero-filling missing positions, skipping all imputers.")
+        final_imputed_data = np.where(
+            np.isnan(data_with_missing), 0.0, data_with_missing)
+        reconstructed_data = reconstruct_federated_data(
+            final_imputed_data, processed_data, data)
+        print(f"\n   Selected method: NoImputation  (zero-filled NaN positions only)")
+        return reconstructed_data
+
     input_dim = data_with_missing.shape[1]
     
     # Initialize all imputers
