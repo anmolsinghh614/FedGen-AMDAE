@@ -660,16 +660,58 @@ def _relocate_per_round_metrics(args: argparse.Namespace,
     shutil.rmtree(live, ignore_errors=True)
 
 
-def _check_no_stale_metrics() -> bool:
-    """Refuse to start a fresh cell if a previous crash left
-    `results/metrics/` lying around -- mixing it into our cell would
-    misattribute someone else's per-round dumps."""
+def _archive_stale_live_metrics(reason: str = "startup") -> Optional[Path]:
+    """If `results/metrics/` is left over from a prior process (an older
+    pipeline driver, a manually-killed run, etc.), move it aside under a
+    timestamped archive directory so the Option A sweep can start with a
+    clean live folder. Idempotent: returns silently if there is nothing
+    to archive."""
     live = ROOT / "results" / "metrics"
-    if live.is_dir() and any(live.iterdir()):
-        print(f"[ERROR] leftover {live} found; refusing to start a new cell.")
-        print("        Move it out of the way (e.g. `mv results/metrics _stale`) "
-              "and re-run.")
-        return False
+    if not live.is_dir():
+        return None
+    try:
+        has_content = any(live.iterdir())
+    except OSError:
+        has_content = True
+    if not has_content:
+        # Empty dir; safe to leave or remove.
+        try:
+            live.rmdir()
+        except OSError:
+            pass
+        return None
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f") + "Z"
+    target = ROOT / "results" / f"_stale_metrics_{stamp}"
+    # Defensive: extremely unlikely with microseconds, but if the
+    # archive name somehow already exists, append a counter.
+    if target.exists():
+        i = 2
+        while (ROOT / "results" / f"_stale_metrics_{stamp}_{i}").exists():
+            i += 1
+        target = ROOT / "results" / f"_stale_metrics_{stamp}_{i}"
+    print(f"[{reason}] Found leftover {live}/  --  archiving to {target.name}/ "
+          f"so the new sweep starts clean.")
+    try:
+        shutil.move(str(live), str(target))
+        if REGISTRY is not None:
+            REGISTRY.info("bootstrap", "stale_metrics_archive",
+                          f"moved {live} -> {target.name}")
+        return target
+    except OSError as exc:
+        print(f"[WARN] could not archive stale {live}: {exc}",
+              file=sys.stderr)
+        if REGISTRY is not None:
+            REGISTRY.failed("bootstrap", "stale_metrics_archive",
+                            f"could not move {live}: {exc}")
+        return None
+
+
+def _check_no_stale_metrics() -> bool:
+    """Defensive: if `results/metrics/` somehow re-appears between cells
+    (e.g. a process other than ours wrote to it), auto-archive it instead
+    of failing the cell. Always returns True."""
+    _archive_stale_live_metrics(reason="pre-cell")
     return True
 
 
@@ -711,11 +753,11 @@ def train_cell(args: argparse.Namespace, dataset: str, alpha: float,
     token = dataset_token(dataset, alpha)
 
     for s in todo_seeds:
-        if not args.dry_run and not _check_no_stale_metrics():
-            if REGISTRY is not None:
-                REGISTRY.failed(phase, f"{cell_id_base}_seed{s}",
-                                "stale results/metrics from previous crash")
-            return
+        if not args.dry_run:
+            # If anything is sitting in results/metrics/ at this point
+            # (older driver, killed run, etc.), quietly archive it so the
+            # current cell starts with a clean live folder.
+            _check_no_stale_metrics()
 
         cmd = [PY, "main.py",
                "--dataset", token,
@@ -984,6 +1026,14 @@ def main() -> None:
         f"  auto_download    = {args.auto_download}\n"
         f"  out_root         = {OUT_ROOT}"
     )
+
+    # Belt-and-braces startup cleanup: if a previous process (an older
+    # pipeline driver, a manually-killed `main.py`, etc.) left behind
+    # `results/metrics/`, archive it aside before any cell starts. The
+    # per-cell guard does the same thing, but doing it once up-front
+    # surfaces the action in the log under a clear bootstrap step.
+    if not args.dry_run:
+        _archive_stale_live_metrics(reason="startup")
 
     if args.full_pipeline:
         # Stage 2 semantics + ablation + paper outputs, all in one go.

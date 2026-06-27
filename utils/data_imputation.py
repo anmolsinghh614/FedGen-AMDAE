@@ -840,13 +840,17 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
     # Select method: hard-force if requested, otherwise use composite score
     if force_imputer:
         # Map a few common shorthand names to the canonical imputer keys.
+        # NB: the canonical names must MATCH the `.name` set by each imputer
+        # class (see AMDAEImputer/MeanImputer/...). The shorthand aliases below
+        # are what the CLI / orchestrator pass via --force_imputer.
         canonical = {k.lower(): k for k in imputed_data_dict.keys()}
         canonical.update({
-            'amdae': 'AMDAE',
-            'am-dae': 'AMDAE',
-            'mean': 'Mean Imputation',
-            'median': 'Median Imputation',
-            'zero': 'Zero Imputation',
+            'amdae':   'AM-DAE',
+            'am-dae':  'AM-DAE',
+            'am_dae':  'AM-DAE',
+            'mean':    'Mean Imputation',
+            'median':  'Median Imputation',
+            'zero':    'Zero Imputation',
         })
         key = canonical.get(force_imputer.lower())
         if key is None or key not in imputed_data_dict:
@@ -854,7 +858,7 @@ def apply_amdae_imputation(data: Tuple, missing_rate: float = 0.7,
             raise ValueError(
                 f"force_imputer={force_imputer!r} not recognised. "
                 f"Valid options: {valid} (also accepted: 'amdae', 'mean', "
-                f"'median', 'zero').")
+                f"'median', 'zero', 'none').")
         best_method = key
         print(f"\n>> FORCED IMPUTER: {best_method}  "
               f"(composite-score selection bypassed)")
