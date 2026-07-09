@@ -4,7 +4,7 @@ A federated learning research codebase that combines **FedGen-style data-free
 knowledge distillation** with the **Adaptive-Learned Median-Filled Deep
 Autoencoder (AM-DAE)** for missing-data imputation, then evaluates it
 side-by-side with FedAvg, FedProx, FedDistill / FedDistill-FL, and
-FedEnsemble on Mnist, EMnist, UCI HAR, and (optionally) PAMAP2.
+FedEnsemble on Mnist, EMnist, UCI HAR, WISDM, and (optionally) PAMAP2.
 
 > **Method note for citation.**
 > Every server class in this repository (`FedAvg`, `FedProx`, `FedDistill`,
@@ -645,15 +645,21 @@ See [Section 8](#goal-3--f1--precision--recall-paper-tables).
 
 Section 11 is the **single source of truth** for reproducing the paper's
 headline numbers. It runs a clean, mechanism-free (MCAR-only) sweep across
-EMNIST-letters, UCI HAR, and PAMAP2 with the alpha and missing-rate grid
+EMNIST-letters, UCI HAR, and WISDM with the alpha and missing-rate grid
 used in our previous paper, then emits the 7 paper tables and 4 dashboard
 figures. If you only want to run one thing, run the commands below.
+
+> **Jul 2026 revision:** the third dataset slot was **PAMAP2** in the
+> original plan and was replaced with **WISDM v1.1** (much smaller: ~11 MB
+> tarball vs ~700 MB, same 24x24 input shape, no model changes). PAMAP2's
+> code paths are still wired up for opt-in reproduction (`--datasets PAMAP2`)
+> but are not part of the default Option A grid.
 
 ### 11.1 Locked grid
 
 | Axis | Values |
 |------|--------|
-| Datasets (run order) | `UCI HAR` -> `EMnist-letters` -> `PAMAP2` |
+| Datasets (run order) | `UCI HAR` -> `EMnist-letters` -> `WISDM` |
 | Heterogeneity (alpha) | `0.1`, `1`, `10` |
 | Missing rate | `0.0`, `0.10`, `0.20` (0% = no-missingness anchor) |
 | Mechanism | MCAR (random) only |
@@ -661,12 +667,13 @@ figures. If you only want to run one thing, run the commands below.
 | Imputer (main sweep) | AM-DAE, **forced** via `--force_imputer amdae` |
 | Imputer (ablation) | FedGen x {AM-DAE, Mean, Median, Zero, no-imputation} |
 | Headline cell (figures + ablation) | alpha=1, missing=10% |
-| Communication rounds | EMNIST 200, UCI HAR 100, PAMAP2 100 |
+| Communication rounds | EMNIST 200, UCI HAR 100, WISDM 100 |
 | Seeds | Stage 1 = 1; Stage 2 = `--times 3` |
 
 Total trainings (across both stages and ablation): ~135 (Stage 1) +
 incremental (Stage 2 only adds the missing seeds) + 45 (ablation).
-Wall-clock on a single GPU: ~62-86 GPU-h, ~3-4 days with monitoring.
+Wall-clock on a single GPU: ~35-50 GPU-h (WISDM is roughly 5-10x lighter
+per cell than PAMAP2 was, so the revised sweep is meaningfully cheaper).
 
 ### 11.2 Auto-download
 
@@ -680,12 +687,18 @@ download anything manually:
   disable on no-internet boxes.
 * **EMNIST-letters** (~562 MB) -- `data/EMnist/generate_niid_dirichlet.py`
   uses `torchvision.datasets.EMNIST(download=True)`.
-* **PAMAP2** (~700 MB zipped / ~3 GB unzipped) --
+* **WISDM v1.1** (~11 MB tarball, ~68 MB raw txt) --
+  `data/WISDM/download_wisdm.py` streams the tarball from
+  `http://www.cis.fordham.edu/wisdm/includes/datasets/latest/WISDM_ar_latest.tar.gz`
+  and extracts `WISDM_ar_v1.1_raw.txt` via Python stdlib. Also invoked
+  automatically by the WISDM Dirichlet generator when the raw file is
+  absent.
+* *(Optional, opt-in)* **PAMAP2** (~700 MB zipped / ~3 GB unzipped) --
   `goal2_real_dataset_experiment.py --prepare_only` downloads + unzips
-  via `urllib`.
+  via `urllib`. Only fetched when you explicitly pass `--datasets PAMAP2`.
 
-All three are idempotent (skip download if already present) and the
-splits are reused across alphas where possible.
+All are idempotent (skip download if already present) and the splits are
+reused across alphas where possible.
 
 ### 11.3 New scripts
 
@@ -693,7 +706,7 @@ splits are reused across alphas where possible.
   generation, per-cell training (with per-seed resume-skip), and the
   imputer ablation phase.
 * `paper_table_optionA.py` -- builds the 6 main paper tables (Accuracy
-  and Macro-F1 on EMNIST / UCI HAR / PAMAP2) and the 1 imputer ablation
+  and Macro-F1 on EMNIST / UCI HAR / WISDM) and the 1 imputer ablation
   table, in CSV + Markdown + LaTeX, with the row winner bolded.
 * `paper_dashboard.py` -- composes the 3 per-dataset 2x3 dashboards
   (`<dataset>_dashboard.png`) and the 4x3 hero figure
@@ -764,7 +777,7 @@ python run_optionA_sweep.py --ablation --device cuda \
 
 ```
 results/optionA/
-├─ <dataset>/                          # emnist | ucihar | pamap2
+├─ <dataset>/                          # emnist | ucihar | wisdm
 │  ├─ alpha0.1_miss0.0/<algo>/
 │  │  ├─ models/<TOKEN>_<algo>_..._<seed>.h5
 │  │  └─ metrics/seed_<s>/<TOKEN>/<algo>_<TOKEN>_round_<R>.h5
@@ -777,15 +790,15 @@ results/optionA/
 ├─ tables/
 │  ├─ accuracy_emnist.{csv,md,tex}     # 3 datasets x 2 metrics = 6 tables
 │  ├─ accuracy_ucihar.{csv,md,tex}
-│  ├─ accuracy_pamap2.{csv,md,tex}
+│  ├─ accuracy_wisdm.{csv,md,tex}
 │  ├─ macro_f1_emnist.{csv,md,tex}
 │  ├─ macro_f1_ucihar.{csv,md,tex}
-│  ├─ macro_f1_pamap2.{csv,md,tex}
+│  ├─ macro_f1_wisdm.{csv,md,tex}
 │  └─ imputer_ablation.{csv,md,tex}    # FedGen x 5 imputers x 3 datasets
 └─ dashboards/
    ├─ emnist_dashboard.png             # 2x3 panels per dataset
    ├─ ucihar_dashboard.png
-   ├─ pamap2_dashboard.png
+   ├─ wisdm_dashboard.png
    └─ hero_figure.png                  # 4 rows (panel types) x 3 cols (datasets)
 ```
 
@@ -799,9 +812,15 @@ results/optionA/
   each other (the per-round HDF5 filename does not include the seed,
   hence the per-seed sub-folder).
 * If `results/metrics/` is left over from a previous crash, the driver
-  refuses to start (to avoid mis-attributing somebody else's per-round
-  HDF5 dumps). Move it aside (e.g. `mv results/metrics _stale`) and
-  re-run.
+  now **auto-archives** it to `results/_stale_metrics_<UTC-timestamp>/`
+  on startup (and again per-cell as a defensive net). No data is lost;
+  the new sweep starts clean. See the "startup" line in
+  `results/optionA/_status.md`.
+* Per-round HDF5 dumps are now compact by default: `y_true`, `y_pred`,
+  and `y_prob` are each stored **once** (schema_version=2), gzip-compressed,
+  and cast to int32 / float32. Older sweeps that wrote 5-way aliased dumps
+  are still readable by every downstream tool -- readers probe multiple
+  candidate keys and fall back to the canonical ones.
 
 ### 11.7 What was deliberately removed
 

@@ -9,10 +9,10 @@ Produces, in `<output_dir>` (default `results/optionA/tables/`):
 
     accuracy_emnist.{csv,md,tex}
     accuracy_ucihar.{csv,md,tex}
-    accuracy_pamap2.{csv,md,tex}
+    accuracy_wisdm.{csv,md,tex}
     macro_f1_emnist.{csv,md,tex}
     macro_f1_ucihar.{csv,md,tex}
-    macro_f1_pamap2.{csv,md,tex}
+    macro_f1_wisdm.{csv,md,tex}
     imputer_ablation.{csv,md,tex}     (when --imputer_ablation is given)
 
 The 6 main tables follow the layout of the paper's MNIST/EMNIST table:
@@ -57,7 +57,7 @@ ALGO_DISPLAY = {
 DATASETS_ORDER = [
     ("EMnist-letters", "EMNIST", "emnist"),
     ("UCI HAR",        "UCI HAR", "ucihar"),
-    ("PAMAP2",         "PAMAP2",  "pamap2"),
+    ("WISDM",          "WISDM",  "wisdm"),
 ]
 ALPHAS = [0.1, 1.0, 10.0]
 MISSING_RATES = [0.0, 0.10, 0.20]

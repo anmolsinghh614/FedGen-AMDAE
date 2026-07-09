@@ -65,7 +65,7 @@ ALGO_DISPLAY = {
 DATASETS_ORDER = [
     ("EMnist-letters", "EMNIST",  "emnist"),
     ("UCI HAR",        "UCI HAR", "ucihar"),
-    ("PAMAP2",         "PAMAP2",  "pamap2"),
+    ("WISDM",          "WISDM",   "wisdm"),
 ]
 ALPHAS = [0.1, 1.0, 10.0]
 MISSING_RATES = [0.0, 0.10, 0.20]
@@ -421,7 +421,7 @@ def compose_hero_figure(input_root: Path, output_dir: Path,
                            title=f"{dataset_disp}: mean acc across cells")
 
     fig.suptitle(
-        "FedGen-AMDAE  --  hero figure across EMNIST / UCI HAR / PAMAP2",
+        "FedGen-AMDAE  --  hero figure across EMNIST / UCI HAR / WISDM",
         fontsize=15)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     out = output_dir / "hero_figure.png"

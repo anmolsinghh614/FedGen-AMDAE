@@ -6,7 +6,7 @@ run_optionA_sweep.py
 Master orchestrator for the Option A paper sweep that produces every cell
 the FedGen-AMDAE paper needs:
 
-    Datasets        : EMnist-letters, UCI HAR, PAMAP2
+    Datasets        : UCI HAR -> EMnist-letters -> WISDM (in this run order)
     Heterogeneity a : {0.1, 1, 10}
     Missing rate    : {0.0, 0.10, 0.20}
     Mechanism       : MCAR (random) only -- MAR / MNAR are not in this sweep
@@ -66,16 +66,16 @@ OUT_ROOT = ROOT / "results" / "optionA"
 ALPHAS_DEFAULT = [0.1, 1.0, 10.0]
 MISSING_RATES_DEFAULT = [0.0, 0.10, 0.20]
 ALGOS_DEFAULT = ["FedAvg", "FedProx", "FedDistill", "FedEnsemble", "FedGen"]
-# Run order: UCI HAR (small, fastest sanity signal) -> EMNIST -> PAMAP2.
+# Run order: UCI HAR (small, fastest sanity signal) -> EMNIST -> WISDM.
 # This is the order produced cells are created in. Stage-1 surfaces UCI
 # HAR first so any wiring break shows up within the first ~hour.
-DATASETS_DEFAULT = ["UCI HAR", "EMnist-letters", "PAMAP2"]
+DATASETS_DEFAULT = ["UCI HAR", "EMnist-letters", "WISDM"]
 SAMPLING_RATIO = 0.5
 N_USERS_TOTAL = 20
 
 # Per-dataset communication-round budget (matches paper conventions;
 # EMNIST gets the FedGen paper's 200, real-data datasets get 100).
-ROUNDS = {"EMnist-letters": 200, "UCI HAR": 100, "PAMAP2": 100}
+ROUNDS = {"EMnist-letters": 200, "UCI HAR": 100, "WISDM": 100}
 
 # UCI HAR raw archive (the only one of the three that is not bundled with
 # torchvision and does not have a download helper inside the project).
@@ -396,7 +396,7 @@ def dataset_short(dataset: str) -> str:
     return {
         "EMnist-letters": "emnist",
         "UCI HAR": "ucihar",
-        "PAMAP2": "pamap2",
+        "WISDM": "wisdm",
     }[dataset]
 
 
@@ -423,8 +423,8 @@ def dataset_split_dir(dataset: str, alpha: float) -> Path:
     if dataset == "UCI HAR":
         return ROOT / "data" / "UCI HAR" / \
             f"u{N_USERS_TOTAL}-alpha{a}-ratio{SAMPLING_RATIO}"
-    if dataset == "PAMAP2":
-        return ROOT / "data" / "PAMAP2" / \
+    if dataset == "WISDM":
+        return ROOT / "data" / "WISDM" / \
             f"u{N_USERS_TOTAL}-alpha{a}-ratio{SAMPLING_RATIO}"
     raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -574,15 +574,17 @@ def ensure_split(args: argparse.Namespace, dataset: str, alpha: float) -> bool:
                "--n_user", str(N_USERS_TOTAL),
                "--alpha", str(alpha),
                "--sampling_ratio", str(SAMPLING_RATIO)]
-    elif dataset == "PAMAP2":
-        gen = ROOT / "goal2_real_dataset_experiment.py"
-        cwd = ROOT
+    elif dataset == "WISDM":
+        # WISDM's generator internally auto-downloads the raw file if
+        # missing (see data/WISDM/download_wisdm.py), so no separate
+        # bootstrap step is needed here. The generator writes to
+        # data/WISDM/u<N>-alpha<a>-ratio<r>/ mirroring UCI HAR exactly.
+        gen = ROOT / "data" / "WISDM" / "generate_niid_dirichlet.py"
+        cwd = ROOT / "data" / "WISDM"
         cmd = [PY, str(gen),
-               "--dataset_kind", "pamap2",
-               "--alpha", str(alpha),
-               "--sampling_ratio", str(SAMPLING_RATIO),
                "--n_user", str(N_USERS_TOTAL),
-               "--prepare_only"]
+               "--alpha", str(alpha),
+               "--sampling_ratio", str(SAMPLING_RATIO)]
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -941,8 +943,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"Override rounds for EMNIST (default {ROUNDS['EMnist-letters']}).")
     p.add_argument("--num_glob_iters_ucihar", type=int, default=None,
                    help=f"Override rounds for UCI HAR (default {ROUNDS['UCI HAR']}).")
-    p.add_argument("--num_glob_iters_pamap2", type=int, default=None,
-                   help=f"Override rounds for PAMAP2 (default {ROUNDS['PAMAP2']}).")
+    p.add_argument("--num_glob_iters_wisdm", type=int, default=None,
+                   help=f"Override rounds for WISDM (default {ROUNDS['WISDM']}).")
 
     # Phase selection.
     p.add_argument("--stage", type=int, default=1, choices=[1, 2],
@@ -974,7 +976,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no_auto_download", dest="auto_download",
                    action="store_false",
                    help="Disable automatic download of raw datasets when "
-                        "they are missing. EMNIST + PAMAP2 are auto-fetched "
+                        "they are missing. EMNIST and WISDM are auto-fetched "
                         "by their data-prep helpers; UCI HAR is auto-fetched "
                         "by this driver. Use this flag to disable UCI HAR "
                         "auto-download (e.g. on a no-internet GPU box).")
@@ -996,8 +998,8 @@ def main() -> None:
         ROUNDS["EMnist-letters"] = args.num_glob_iters_emnist
     if args.num_glob_iters_ucihar is not None:
         ROUNDS["UCI HAR"] = args.num_glob_iters_ucihar
-    if args.num_glob_iters_pamap2 is not None:
-        ROUNDS["PAMAP2"] = args.num_glob_iters_pamap2
+    if args.num_glob_iters_wisdm is not None:
+        ROUNDS["WISDM"] = args.num_glob_iters_wisdm
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
 

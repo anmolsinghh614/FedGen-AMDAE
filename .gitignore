@@ -150,6 +150,15 @@ dmypy.json
 data/UCI HAR/*
 !data/UCI HAR/generate_niid_dirichlet.py
 data/PAMAP2/
+
+# WISDM (Jul 2026 replacement for PAMAP2). Track only the small helper
+# scripts; ignore the ~11 MB tarball, the ~68 MB raw txt, and the
+# generated per-(alpha, ratio) Dirichlet splits.
+data/WISDM/*
+!data/WISDM/download_wisdm.py
+!data/WISDM/generate_niid_dirichlet.py
+!data/WISDM/README.md
+
 results/models/
 models/
 results/
