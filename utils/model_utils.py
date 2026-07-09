@@ -16,11 +16,40 @@ from utils.data_imputation import apply_amdae_imputation
 METRICS = ['glob_acc', 'per_acc', 'glob_loss', 'per_loss', 'user_train_time', 'server_agg_time']
 
 
+def _parse_alpha_ratio(dataset):
+    """Extract alpha and ratio values from a dataset token, regardless of
+    how many extra segments (e.g. ``letters``) are wedged in between.
+
+    Handles tokens like:
+        ``EMnist-letters-alpha0.1-ratio0.5``
+        ``EMnist-alpha0.1-ratio0.1-0-letters``  (legacy layout)
+        ``UCI HAR-alpha0.1-ratio0.5``
+        ``WISDM-alpha1.0-ratio0.5``
+
+    Returns
+    -------
+    (alpha_str, ratio_str) as raw string tokens (e.g. ``('0.1', '0.5')``).
+    """
+    parts = dataset.split('-')
+    alpha = ratio = None
+    for p in parts:
+        if p.startswith('alpha') and alpha is None:
+            alpha = p[len('alpha'):]
+        elif p.startswith('ratio') and ratio is None:
+            ratio = p[len('ratio'):]
+    if alpha is None or ratio is None:
+        raise ValueError(
+            f"could not parse alpha/ratio from dataset token {dataset!r}; "
+            f"expected a segment starting with 'alpha' and one starting "
+            f"with 'ratio' (e.g. 'EMnist-letters-alpha0.1-ratio0.5').")
+    return alpha, ratio
+
+
 def get_data_dir(dataset):
     if 'EMnist' in dataset:
-        #EMnist-alpha0.1-ratio0.1-0-letters
-        dataset_=dataset.replace('alpha', '').replace('ratio', '').split('-')
-        alpha, ratio =dataset_[1], dataset_[2]
+        # Modern: EMnist-letters-alpha0.1-ratio0.5
+        # Legacy: EMnist-alpha0.1-ratio0.1-0-letters
+        alpha, ratio = _parse_alpha_ratio(dataset)
         types = 'letters'
         path_prefix = os.path.join('data', 'EMnist', f'u20-{types}-alpha{alpha}-ratio{ratio}')
         train_data_dir=os.path.join(path_prefix, 'train')
@@ -28,18 +57,15 @@ def get_data_dir(dataset):
         proxy_data_dir = 'data/proxy_data/emnist-n10/'
 
     elif 'Mnist' in dataset:
-        dataset_=dataset.replace('alpha', '').replace('ratio', '').split('-')
-        alpha, ratio=dataset_[1], dataset_[2]
-        #path_prefix=os.path.join('data', 'Mnist', 'u20alpha{}min10ratio{}'.format(alpha, ratio))
+        alpha, ratio = _parse_alpha_ratio(dataset)
         path_prefix=os.path.join('data', 'Mnist', 'u20c10-alpha{}-ratio{}'.format(alpha, ratio))
         train_data_dir=os.path.join(path_prefix, 'train')
         test_data_dir=os.path.join(path_prefix, 'test')
         proxy_data_dir = 'data/proxy_data/mnist-n10/'
 
     elif 'UCI HAR' in dataset:
-        # UCI HAR-alpha0.1-ratio0.1
-        dataset_ = dataset.replace('alpha', '').replace('ratio', '').split('-')
-        alpha, ratio = dataset_[1], dataset_[2]
+        # UCI HAR-alpha0.1-ratio0.5
+        alpha, ratio = _parse_alpha_ratio(dataset)
         path_prefix = os.path.join('data', 'UCI HAR', f'u20-alpha{alpha}-ratio{ratio}')
         train_data_dir = os.path.join(path_prefix, 'train')
         test_data_dir = os.path.join(path_prefix, 'test')
@@ -47,8 +73,7 @@ def get_data_dir(dataset):
 
     elif 'pamap2' in dataset.lower() or 'PAMAP2' in dataset:
         # PAMAP2-alpha0.1-ratio0.5
-        dataset_ = dataset.replace('alpha', '').replace('ratio', '').split('-')
-        alpha, ratio = dataset_[1], dataset_[2]
+        alpha, ratio = _parse_alpha_ratio(dataset)
         path_prefix = os.path.join('data', 'PAMAP2', f'u20-alpha{alpha}-ratio{ratio}')
         train_data_dir = os.path.join(path_prefix, 'train')
         test_data_dir = os.path.join(path_prefix, 'test')
@@ -56,8 +81,7 @@ def get_data_dir(dataset):
 
     elif 'wisdm' in dataset.lower() or 'WISDM' in dataset:
         # WISDM-alpha0.1-ratio0.5
-        dataset_ = dataset.replace('alpha', '').replace('ratio', '').split('-')
-        alpha, ratio = dataset_[1], dataset_[2]
+        alpha, ratio = _parse_alpha_ratio(dataset)
         path_prefix = os.path.join('data', 'WISDM', f'u20-alpha{alpha}-ratio{ratio}')
         train_data_dir = os.path.join(path_prefix, 'train')
         test_data_dir = os.path.join(path_prefix, 'test')
