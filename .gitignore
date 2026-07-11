@@ -159,9 +159,24 @@ data/WISDM/*
 !data/WISDM/generate_niid_dirichlet.py
 !data/WISDM/README.md
 
+# Run 3 medical-imaging slots (FedISIC = ISIC 2019, ~9 GB raw JPGs;
+# HAM10000 = ISIC 2018 Task 3, ~2.8 GB raw JPGs). Track only the small
+# helper scripts; ignore raw pools, cached tensors, and generated
+# per-(alpha, ratio) Dirichlet splits.
+data/FedISIC/*
+!data/FedISIC/download_fedisic.py
+!data/FedISIC/generate_niid_dirichlet.py
+!data/FedISIC/README.md
+
+data/HAM10000/*
+!data/HAM10000/download_ham10000.py
+!data/HAM10000/generate_niid_dirichlet.py
+!data/HAM10000/README.md
+
 results/models/
 models/
 results/
+results_test/
 
 # PDFs and other large research files
 *.pdf

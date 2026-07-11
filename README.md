@@ -30,9 +30,10 @@ FedEnsemble on Mnist, EMnist, UCI HAR, WISDM, and (optionally) PAMAP2.
 9. [One-shot orchestrator (`run_paper_pipeline.py`)](#9-one-shot-orchestrator-run_paper_pipelinepy)
 10. [Tables, plots, and metrics tooling](#10-tables-plots-and-metrics-tooling)
 11. [Option A paper sweep (run this for the paper)](#11-option-a-paper-sweep-run-this-for-the-paper)
-12. [Outputs you will get](#12-outputs-you-will-get)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Citing this work](#14-citing-this-work)
+12. [Run 3 sweep: MNIST -> FedISIC -> HAM10000](#12-run-3-sweep-mnist---fedisic---ham10000)
+13. [Outputs you will get](#13-outputs-you-will-get)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Citing this work](#15-citing-this-work)
 
 ---
 
@@ -847,7 +848,173 @@ baseline.
 
 ---
 
-## 12. Outputs you will get
+## 12. Run 3 sweep: MNIST -> FedISIC -> HAM10000
+
+The Run 3 sweep targets datasets where FedGen-AMDAE has the strongest
+inductive advantage (high-dimensional, spatially-correlated features
+plus many classes), so the imputer ablation lands decisively even
+when compared against Mean / Median baselines. It follows the same
+grid shape as Option A but swaps in three medical-imaging-focused
+datasets and adds two extra metrics (Macro Precision, Macro Recall).
+
+### 12.1 Locked grid
+
+| Axis | Values |
+|------|--------|
+| Datasets (run order) | `Mnist` -> `FedISIC` (ISIC 2019) -> `HAM10000` (ISIC 2018 Task 3) |
+| Heterogeneity (alpha) | `0.1`, `1`, `10` |
+| Missing rate | `0.0`, `0.10`, `0.20` |
+| Mechanism | MCAR (random) only |
+| Algorithms | FedAvg, FedProx, FedDistill, FedEnsemble, FedGen |
+| Imputer (main sweep) | AM-DAE, **forced** via `--force_imputer amdae` |
+| Imputer (ablation) | FedGen x {AM-DAE, Mean, Median, Zero, none} |
+| Headline cell | alpha=1, miss=10% |
+| Communication rounds | Mnist 100, FedISIC 200, HAM10000 200 |
+| Seeds | Stage 1 = 1, Stage 2 = `--times 3` |
+| Metrics | Accuracy, Macro F1, **Macro Precision**, **Macro Recall** |
+
+The medical datasets are downsampled to **32x32 RGB** so the same
+small CNN backbone from the FedGen paper's CIFAR-10 setup applies with
+no per-dataset architecture changes.
+
+### 12.2 Auto-download
+
+Everything self-bootstraps on first call:
+
+* **MNIST** -- `data/Mnist/generate_niid_dirichlet.py` uses
+  `torchvision.datasets.MNIST(download=True)`.
+* **FedISIC** (~9 GB, ISIC 2019 challenge) --
+  `data/FedISIC/download_fedisic.py` streams from the ISIC public S3
+  bucket (`https://isic-challenge-data.s3.amazonaws.com/2019/`); no
+  auth or registration needed. Called automatically by the Dirichlet
+  generator on first use.
+* **HAM10000** (~2.8 GB, ISIC 2018 Task 3) --
+  `data/HAM10000/download_ham10000.py` streams from the same ISIC S3
+  bucket. Also auto-invoked by the Dirichlet generator.
+
+All downloads are idempotent (skip files already on disk). Both
+medical datasets cache a per-channel z-scored `(N, 3, 32, 32)` tensor
+under `raw/*_cache_32x32.pt` after first-time preprocessing, so
+subsequent alpha values do not re-parse 25 000 JPGs.
+
+### 12.3 New scripts
+
+* `run_run3_sweep.py` -- master driver (mirror of
+  `run_optionA_sweep.py`, with the Run 3 dataset order and output
+  root at `results/run3/`).
+* `paper_table_run3.py` -- builds **12** main tables (4 metrics x 3
+  datasets: Accuracy, Macro F1, Macro Precision, Macro Recall) plus
+  the imputer-ablation table (now with 4 metric columns).
+* `paper_dashboard_run3.py` -- composes the per-dataset dashboards,
+  the 4x3 hero figure, **and two new 3x3 curve grids per dataset**
+  (accuracy over rounds, and Macro F1 over rounds; rows = alpha,
+  cols = missing rate).
+
+### 12.4 Recommended runbook
+
+```bash
+# 0. Dry-run: verify commands the driver will emit.
+python run_run3_sweep.py --dry_run --full_pipeline --times 3
+
+# 1. Stage 1 -- single seed across the full grid.
+tmux new -s run3_stage1
+python run_run3_sweep.py --stage 1 --device cuda \
+       2>&1 | tee logs/run3_stage1.log
+
+# 2. Full pipeline: Stage 2 (multi-seed) + imputer ablation + tables +
+#    dashboards, all in one command. Only the missing seeds are
+#    trained thanks to per-cell resume-skip.
+python run_run3_sweep.py --full_pipeline --device cuda --times 3 \
+       2>&1 | tee logs/run3_full.log
+```
+
+Subset examples:
+
+```bash
+# One dataset only, one alpha, one algorithm
+python run_run3_sweep.py --stage 1 --device cuda \
+       --datasets FedISIC --alphas 1.0 --algorithms FedGen
+
+# Regenerate tables + dashboards only (no training)
+python paper_table_run3.py     --metric all --imputer_ablation
+python paper_dashboard_run3.py --headline-alpha 1 --headline-missing 0.10
+```
+
+### 12.5 Output layout
+
+```
+results/run3/
+├─ <dataset>/                         # mnist | fedisic | ham10000
+│  └─ alpha<a>_miss<m>/<algo>/
+│     ├─ models/<TOKEN>_<algo>_..._<seed>.h5
+│     └─ metrics/seed_<s>/<TOKEN>/<algo>_<TOKEN>_round_<R>.h5
+│                                       # y_true, y_pred, y_prob per round
+├─ tables/
+│  ├─ accuracy_{mnist,fedisic,ham10000}.{csv,md,tex}    (3)
+│  ├─ macro_f1_{...}.{csv,md,tex}                        (3)
+│  ├─ precision_{...}.{csv,md,tex}                       (3)   <- NEW
+│  ├─ recall_{...}.{csv,md,tex}                          (3)   <- NEW
+│  └─ imputer_ablation.{csv,md,tex}
+├─ dashboards/
+│  ├─ <dataset>_dashboard.png             # 2x3 headline dashboard
+│  ├─ <dataset>_accuracy_curves.png       # NEW 3x3 (alpha x miss) accuracy
+│  ├─ <dataset>_f1_curves.png             # NEW 3x3 (alpha x miss) Macro-F1
+│  └─ hero_figure.png                     # 4 rows x 3 cols
+├─ _status.md                              # human-readable milestone log
+├─ _status.json                            # every event, with timestamps
+└─ _status_summary.json                    # flat snapshot + verdict
+```
+
+The new **3x3 curve grids** are the equivalent of the paper's classic
+"accuracy vs. round" figure, one panel per `(alpha, missing_rate)`
+combination:
+
+```
+             miss=0%     miss=10%    miss=20%
+alpha=0.1    panel        panel       panel
+alpha=1.0    panel        panel       panel
+alpha=10.0   panel        panel       panel
+```
+
+Each panel plots mean +/- std across seeds for all 5 algorithms.
+F1 is computed per round from the per-round `y_true`/`y_pred` dumps
+(post-processing; no re-runs needed).
+
+### 12.6 Metrics -- how each is computed
+
+* **Accuracy** -- final-round `glob_acc` from the summary HDF5.
+* **Macro F1 / Macro Precision / Macro Recall** -- computed from
+  the last-round `(y_true, y_pred)` HDF5 in each `seed_<s>/<TOKEN>/`
+  folder using `sklearn.metrics.{f1_score, precision_score,
+  recall_score}` with `average="macro"` and
+  `zero_division=0`.
+
+Because the per-round `y_true`/`y_pred` are stored every round,
+adding future metrics (per-class F1, PR-AUC, calibration error,
+etc.) never requires re-running the sweep -- just extend
+`paper_table_run3.py` and `paper_dashboard_run3.py`.
+
+### 12.7 Why these three datasets
+
+The Option A sweep observed that AM-DAE dominated on EMNIST-letters
+(high-D, spatially-correlated, many classes) but was outperformed by
+median imputation on WISDM (low-D, z-scored, few classes). The Run 3
+grid is chosen so all three datasets sit on the "AM-DAE wins"
+side of that rulebook:
+
+* **MNIST** -- easy anchor, 10 classes, 784 features. AM-DAE should
+  win comfortably; used to verify the pipeline is not regressing.
+* **FedISIC (ISIC 2019)** -- 8 dermoscopy lesion classes, 3-channel
+  32x32 features. Naturally federated (6 collecting hospitals). We
+  use Dirichlet partitioning for grid consistency with the rest of
+  the sweep.
+* **HAM10000 (ISIC 2018 Task 3)** -- 7 dermatoscopy classes,
+  3-channel 32x32 features. Smaller than FedISIC (~10 k images) and
+  a well-known medical FL benchmark.
+
+---
+
+## 13. Outputs you will get
 
 ```
 results/
@@ -887,7 +1054,7 @@ results/
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 **"Dataset not recognized"** — the dataset token must match the
 `get_data_dir()` patterns in `utils/model_utils.py`. Make sure the
@@ -925,7 +1092,7 @@ the generator. There is no automatic download for HAR.
 
 ---
 
-## 14. Citing this work
+## 15. Citing this work
 
 If you use this codebase, please cite:
 

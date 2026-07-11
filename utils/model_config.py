@@ -13,6 +13,9 @@ CONFIGS_ = {
     'ucihar': ([6, 16, 'F'], 1, 6, 576, 32),  # 1-ch 24x24, Conv->12x12->6x6, flat=576
     'pamap2': ([6, 16, 'F'], 1, 12, 64, 32),  # 1-ch 8x8 (51 IMU + 13 zero pad), Conv->4x4->2x2, flat=16*2*2=64
     'wisdm':  ([6, 16, 'F'], 1, 6, 576, 32),  # 1-ch 24x24 (192 samples @ 20Hz x 3 axes = 576), same head as UCI HAR
+    # Run 3 medical image slots: 3-ch 32x32 RGB, Conv(s=2)->16x16->8x8, flat=16*8*8=1024
+    'fedisic':  ([6, 16, 'F'], 3, 8, 1024, 32),   # ISIC 2019, 8 lesion classes
+    'ham10000': ([6, 16, 'F'], 3, 7, 1024, 32),   # ISIC 2018 Task 3, 7 lesion classes
 }
 
 # temporary roundabout to evaluate sensitivity of the generator
@@ -33,6 +36,8 @@ GENERATORCONFIGS = {
     'ucihar': (256, 32, 1, 6, 32),
     'pamap2': (256, 32, 1, 12, 32),
     'wisdm':  (256, 32, 1, 6, 32),
+    'fedisic':  (512, 32, 3, 8, 64),   # RGB generator, 8 classes
+    'ham10000': (512, 32, 3, 7, 64),   # RGB generator, 7 classes
 }
 
 
@@ -120,6 +125,36 @@ RUNCONFIGS = {
             'unique_labels': 6,     # 6 WISDM activity classes
             'generative_alpha': 10,
             'generative_beta': 1,
+            'weight_decay': 1e-2
+        },
+
+    'fedisic':
+        {
+            'ensemble_lr': 1e-4,
+            'ensemble_batch_size': 128,
+            'ensemble_epochs': 50,
+            'num_pretrain_iters': 20,
+            'ensemble_alpha': 1,    # teacher loss (server side)
+            'ensemble_beta': 0,     # adversarial student loss
+            'unique_labels': 8,     # 8 ISIC 2019 lesion classes
+            'generative_alpha': 10,
+            'generative_beta': 10,  # medical images benefit from stronger
+                                    # generator regularisation (per FedGen
+                                    # paper CIFAR settings)
+            'weight_decay': 1e-2
+        },
+
+    'ham10000':
+        {
+            'ensemble_lr': 1e-4,
+            'ensemble_batch_size': 128,
+            'ensemble_epochs': 50,
+            'num_pretrain_iters': 20,
+            'ensemble_alpha': 1,    # teacher loss (server side)
+            'ensemble_beta': 0,     # adversarial student loss
+            'unique_labels': 7,     # 7 HAM10000 (ISIC 2018 Task 3) classes
+            'generative_alpha': 10,
+            'generative_beta': 10,
             'weight_decay': 1e-2
         },
 
