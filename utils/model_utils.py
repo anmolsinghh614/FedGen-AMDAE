@@ -103,6 +103,14 @@ def get_data_dir(dataset):
         test_data_dir = os.path.join(path_prefix, 'test')
         proxy_data_dir = 'data/proxy_data/ham10000-n10/'
 
+    elif 'cifar10' in dataset.lower() or 'CIFAR10' in dataset:
+        # CIFAR10-alpha0.1-ratio0.5 (10 classes, 32x32 RGB)
+        alpha, ratio = _parse_alpha_ratio(dataset)
+        path_prefix = os.path.join('data', 'CIFAR10', f'u20-alpha{alpha}-ratio{ratio}')
+        train_data_dir = os.path.join(path_prefix, 'train')
+        test_data_dir = os.path.join(path_prefix, 'test')
+        proxy_data_dir = 'data/proxy_data/cifar10-n10/'
+
     elif 'celeb' in dataset.lower():
         dataset_ = dataset.lower().replace('user', '').replace('agg','').split('-')
         user, agg_user = dataset_[1], dataset_[2]
@@ -274,6 +282,8 @@ def get_dataset_name(dataset):
         passed_dataset='fedisic'
     elif 'ham10000' in dataset:
         passed_dataset='ham10000'
+    elif 'cifar10' in dataset:
+        passed_dataset='cifar10'
     elif 'ucihar' in dataset or 'uci har' in dataset:
         passed_dataset='ucihar'
     elif 'emnist' in dataset:

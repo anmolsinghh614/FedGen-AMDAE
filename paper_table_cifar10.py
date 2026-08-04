@@ -1,57 +1,45 @@
 #!/usr/bin/env python
 """
-paper_table_optionA.py
+paper_table_cifar10.py
 ======================
 
-Generate paper-style stacked tables from a completed Option-A sweep.
+Generate paper-style stacked tables from a completed CIFAR-10 sweep.
+Single-dataset counterpart to `paper_table_run3.py`: produces 4 main
+tables (Accuracy, Macro F1, Macro Precision, Macro Recall) for CIFAR-10
+plus an optional imputer ablation table.
 
-Produces, in `<output_dir>` (default `results/optionA/tables/`):
+Produces, in `<output_dir>` (default `results/cifar10/tables/`):
 
-    accuracy_emnist.{csv,md,tex}       precision_emnist.{csv,md,tex}
-    accuracy_ucihar.{csv,md,tex}       precision_ucihar.{csv,md,tex}
-    accuracy_wisdm.{csv,md,tex}        precision_wisdm.{csv,md,tex}
-    macro_f1_emnist.{csv,md,tex}       recall_emnist.{csv,md,tex}
-    macro_f1_ucihar.{csv,md,tex}       recall_ucihar.{csv,md,tex}
-    macro_f1_wisdm.{csv,md,tex}        recall_wisdm.{csv,md,tex}
-    imputer_ablation.{csv,md,tex}      (when --imputer_ablation is given)
+    accuracy_cifar10.{csv,md,tex}
+    macro_f1_cifar10.{csv,md,tex}
+    precision_cifar10.{csv,md,tex}
+    recall_cifar10.{csv,md,tex}
+    imputer_ablation.{csv,md,tex}   (when --imputer_ablation is given)
 
-The 12 main tables follow the layout of the paper's MNIST/EMNIST table:
-  * 5 algorithm columns (FedGen, FedAvg, FedProx, FedEnsemble, FedDistill).
-  * Rows grouped by alpha; each alpha block has a 0%/10%/20% missing
-    sub-row.
-  * Cells contain mean +/- std (computed across the seeds present in the
-    sweep). Stage-1 cells show only mean (one seed = std undefined).
-  * The winning algorithm per row is **bolded** in Markdown and LaTeX.
+The main tables use the same layout as Option A / Run 3:
+5 algorithm columns, rows grouped by alpha, missing-rate sub-rows.
+Cells are mean +/- std across seeds; the winning algorithm per row is
+bolded in Markdown and LaTeX.
 
-Precision + Recall are both macro-averaged and are computed from the
-stored `y_true`/`y_pred` in each `metrics/seed_<s>/<TOKEN>/` folder
-(no re-training required -- pure post-processing).
-
-The imputer-ablation table is a single document with 3 dataset blocks,
-each showing FedGen at the headline cell (alpha=1, missing=10%) trained
-with each of the 5 imputer choices (AM-DAE, Mean, Median, Zero, no
-imputation), reporting Accuracy, Macro F1, Macro Precision, and
-Macro Recall (4 columns).
+The imputer-ablation table reports 4 metric columns (Accuracy, Macro F1,
+Precision, Recall) per imputer.
 
 Usage::
 
-    python paper_table_optionA.py --metric Accuracy
-    python paper_table_optionA.py --metric MacroF1
-    python paper_table_optionA.py --metric Precision
-    python paper_table_optionA.py --metric Recall
-    python paper_table_optionA.py --metric all --imputer_ablation
+    python paper_table_cifar10.py                       # all 4 main + optional ablation
+    python paper_table_cifar10.py --metric Accuracy     # subset
+    python paper_table_cifar10.py --metric all --imputer_ablation
 """
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_INPUT = ROOT / "results" / "optionA"
-DEFAULT_OUTPUT = ROOT / "results" / "optionA" / "tables"
+DEFAULT_INPUT = ROOT / "results" / "cifar10"
+DEFAULT_OUTPUT = ROOT / "results" / "cifar10" / "tables"
 
 ALGOS_ORDER = ["FedGen", "FedAvg", "FedProx", "FedEnsemble", "FedDistill"]
 ALGO_DISPLAY = {
@@ -62,9 +50,7 @@ ALGO_DISPLAY = {
     "FedDistill": "FedDist.",
 }
 DATASETS_ORDER = [
-    ("EMnist-letters", "EMNIST", "emnist"),
-    ("UCI HAR",        "UCI HAR", "ucihar"),
-    ("WISDM",          "WISDM",  "wisdm"),
+    ("CIFAR10", "CIFAR-10", "cifar10"),
 ]
 ALPHAS = [0.1, 1.0, 10.0]
 MISSING_RATES = [0.0, 0.10, 0.20]
@@ -79,21 +65,18 @@ ABLATION_IMPUTERS = [
 ]
 
 # Metric registry.
-# * "Accuracy" is read directly from `glob_acc` in the summary HDF5.
-# * "MacroF1"/"Precision"/"Recall" are computed from stored
-#    y_true/y_pred using sklearn (macro average, zero_division=0).
 METRIC_ORDER = ["Accuracy", "MacroF1", "Precision", "Recall"]
 METRIC_LABEL = {
-    "Accuracy":  "accuracy",
-    "MacroF1":   "macro_f1",
-    "Precision": "precision",
-    "Recall":    "recall",
+    "Accuracy":   "accuracy",
+    "MacroF1":    "macro_f1",
+    "Precision":  "precision",
+    "Recall":     "recall",
 }
 METRIC_TITLE = {
-    "Accuracy":  "Accuracy (%)",
-    "MacroF1":   "Macro F1 (%)",
-    "Precision": "Macro Precision (%)",
-    "Recall":    "Macro Recall (%)",
+    "Accuracy":   "Accuracy (%)",
+    "MacroF1":    "Macro F1 (%)",
+    "Precision":  "Macro Precision (%)",
+    "Recall":     "Macro Recall (%)",
 }
 
 
@@ -108,6 +91,13 @@ def cell_dir(input_root: Path, dataset_short: str, alpha: float,
     if suffix:
         base = base / suffix
     return base
+
+
+def _round_idx(p: Path) -> int:
+    try:
+        return int(p.stem.rsplit("_", 1)[-1])
+    except ValueError:
+        return -1
 
 
 # ---------------------------------------------------------------- HDF5 reads
@@ -134,11 +124,9 @@ def read_per_seed_metric_from_preds(metrics_dir: Path, dataset: str,
                                     alpha: float, algo: str,
                                     metric: str) -> List[float]:
     """One `metric` per `seed_<s>/<TOKEN>/` sub-folder, computed from the
-    highest-round per-round HDF5 in that folder.
+    highest-round per-round HDF5.
 
-    `metric` in {'MacroF1', 'Precision', 'Recall'} (all macro-averaged,
-    zero_division=0).
-    """
+    `metric` is one of 'MacroF1', 'Precision', 'Recall'."""
     import h5py
     import numpy as np
     from sklearn.metrics import (
@@ -163,9 +151,6 @@ def read_per_seed_metric_from_preds(metrics_dir: Path, dataset: str,
     seed_dirs = sorted(p for p in metrics_dir.iterdir()
                        if p.is_dir() and p.name.startswith("seed_"))
     if not seed_dirs:
-        # Backwards-compat: an older run may have written a flat
-        # `<metrics>/<TOKEN>/...` (no per-seed namespacing). Treat it as
-        # if it were a single-seed sub-folder.
         flat = metrics_dir / token
         seed_dirs = [flat] if flat.is_dir() else []
 
@@ -189,20 +174,6 @@ def read_per_seed_metric_from_preds(metrics_dir: Path, dataset: str,
     return out
 
 
-# Backwards-compat alias used by earlier revisions / external callers.
-def read_per_seed_macro_f1(metrics_dir: Path, dataset: str, alpha: float,
-                           algo: str) -> List[float]:
-    return read_per_seed_metric_from_preds(
-        metrics_dir, dataset, alpha, algo, "MacroF1")
-
-
-def _round_idx(p: Path) -> int:
-    try:
-        return int(p.stem.rsplit("_", 1)[-1])
-    except ValueError:
-        return -1
-
-
 # ---------------------------------------------------------------- aggregation
 def collect_cell_values(input_root: Path, dataset: str, dataset_short: str,
                         alpha: float, miss: float, algo: str, metric: str,
@@ -217,8 +188,6 @@ def collect_cell_values(input_root: Path, dataset: str, dataset_short: str,
 
 
 def mean_std_pct(values: List[float], pct: bool = True) -> Tuple[Optional[float], Optional[float], int]:
-    """Return (mean_in_percent, std_in_percent, n). If `pct=False` returns the
-    raw values. Returns (None, None, 0) when no seeds are present."""
     import numpy as np
     if not values:
         return None, None, 0
@@ -231,8 +200,6 @@ def mean_std_pct(values: List[float], pct: bool = True) -> Tuple[Optional[float]
 
 
 def fmt_cell(mu: Optional[float], sd: Optional[float], n: int) -> str:
-    """Cell display string. Uses the paper's '88.7 +/- 0.3' style with one
-    decimal."""
     if mu is None:
         return "--"
     if n <= 1:
@@ -242,24 +209,9 @@ def fmt_cell(mu: Optional[float], sd: Optional[float], n: int) -> str:
 
 # ---------------------------------------------------------------- table build
 def build_main_table(input_root: Path, dataset: str, dataset_short: str,
-                     metric: str) -> "list[list[str]]":
-    """Build a 2-D table for one (dataset, metric) pair.
-
-    Layout (rows):
-        header row
-        block-header for alpha=0.1
-            row miss=0.0
-            row miss=0.10
-            row miss=0.20
-        block-header for alpha=1
-            ... (same)
-        block-header for alpha=10
-            ... (same)
-    Cells store dictionaries with {'text', 'is_winner', 'block_header'}.
-    """
+                     metric: str) -> "list[dict]":
     rows: list[dict] = []
 
-    # Header
     rows.append({
         "kind": "header",
         "cells": ["Setting"] + [ALGO_DISPLAY[a] for a in ALGOS_ORDER],
@@ -297,11 +249,10 @@ def build_main_table(input_root: Path, dataset: str, dataset_short: str,
     return rows
 
 
-def build_imputer_ablation(input_root: Path) -> "list[list[str]]":
-    """One table with 3 dataset blocks, each showing FedGen at the headline
-    cell with each of the 5 imputers in `ABLATION_IMPUTERS`. Four metric
-    columns (Accuracy, Macro F1, Precision, Recall).
-    """
+def build_imputer_ablation(input_root: Path) -> "list[dict]":
+    """1 dataset block (CIFAR-10) showing FedGen at the headline cell with
+    each of the 5 imputers. 4 metric columns:
+    Accuracy, Macro F1, Precision, Recall."""
     rows: list[dict] = []
 
     rows.append({
@@ -319,8 +270,7 @@ def build_imputer_ablation(input_root: Path) -> "list[list[str]]":
                       "", "", "", ""],
         })
 
-        # Collect (acc, f1, precision, recall) tuples per imputer.
-        per_imputer = []
+        per_imputer: List[Tuple[Tuple, Tuple, Tuple, Tuple]] = []
         for impid, _disp in ABLATION_IMPUTERS:
             suffix = f"imputer_ablation/{impid}"
             stats = tuple(
@@ -330,9 +280,8 @@ def build_imputer_ablation(input_root: Path) -> "list[list[str]]":
                                         "FedGen", metric, suffix=suffix))
                 for metric in METRIC_ORDER
             )
-            per_imputer.append(stats)
+            per_imputer.append(stats)  # type: ignore[arg-type]
 
-        # Per-column winner
         best_idx: List[Optional[int]] = []
         for col in range(len(METRIC_ORDER)):
             mus = [p[col][0] if p[col][0] is not None else float("-inf")
@@ -374,9 +323,7 @@ def write_csv(rows: list, path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         for r in rows:
-            if r["kind"] == "header":
-                w.writerow(r["cells"])
-            elif r["kind"] == "block":
+            if r["kind"] in ("header", "block"):
                 w.writerow(r["cells"])
             else:
                 line = [r["label"]] + [c["text"] for c in r["cells"]]
@@ -386,7 +333,6 @@ def write_csv(rows: list, path: Path) -> None:
 def write_markdown(rows: list, path: Path, title: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"## {title}", ""]
-    # Table header (first 'header' row)
     header_row = next((r for r in rows if r["kind"] == "header"), None)
     if header_row is None:
         return
@@ -475,7 +421,7 @@ def emit_imputer_ablation_table(input_root: Path, output_dir: Path) -> None:
     stem = "imputer_ablation"
     title = (f"Imputer ablation -- FedGen at headline cell "
              f"(alpha={HEADLINE_ALPHA}, miss={int(HEADLINE_MISS * 100)}%) "
-             f"per dataset.")
+             f"on CIFAR-10.")
     write_csv(rows, output_dir / f"{stem}.csv")
     write_markdown(rows, output_dir / f"{stem}.md", title)
     write_latex(rows, output_dir / f"{stem}.tex", title)
@@ -487,18 +433,15 @@ def parse_args() -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--input-root", default=str(DEFAULT_INPUT),
-                   help=f"Root of the Option A sweep results "
-                        f"(default {DEFAULT_INPUT}).")
+                   help=f"Root of the CIFAR-10 sweep results (default {DEFAULT_INPUT}).")
     p.add_argument("--output-dir", default=str(DEFAULT_OUTPUT),
                    help=f"Where to write tables (default {DEFAULT_OUTPUT}).")
-    p.add_argument("--metric", choices=METRIC_ORDER + ["all"],
-                   default="all",
+    p.add_argument("--metric",
+                   choices=METRIC_ORDER + ["all"], default="all",
                    help="Which main table(s) to produce. Default 'all' "
-                        "produces 12 main tables (3 datasets x 4 metrics: "
-                        "Accuracy, Macro F1, Precision, Recall).")
+                        "produces 4 main tables (1 dataset x 4 metrics).")
     p.add_argument("--imputer_ablation", action="store_true",
-                   help="Additionally produce results/optionA/tables/"
-                        "imputer_ablation.{csv,md,tex} (4 metric columns).")
+                   help="Additionally produce imputer_ablation.{csv,md,tex}.")
     return p.parse_args()
 
 

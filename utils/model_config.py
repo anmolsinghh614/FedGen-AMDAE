@@ -16,6 +16,9 @@ CONFIGS_ = {
     # Run 3 medical image slots: 3-ch 32x32 RGB, Conv(s=2)->16x16->8x8, flat=16*8*8=1024
     'fedisic':  ([6, 16, 'F'], 3, 8, 1024, 32),   # ISIC 2019, 8 lesion classes
     'ham10000': ([6, 16, 'F'], 3, 7, 1024, 32),   # ISIC 2018 Task 3, 7 lesion classes
+    # CIFAR-10: 3-ch 32x32 RGB, Conv(s=2)->16x16->8x8, flat=16*8*8=1024, 10 classes
+    # (kept separate from the legacy 'cifar' key whose arithmetic was inconsistent)
+    'cifar10':  ([6, 16, 'F'], 3, 10, 1024, 32),
 }
 
 # temporary roundabout to evaluate sensitivity of the generator
@@ -38,6 +41,7 @@ GENERATORCONFIGS = {
     'wisdm':  (256, 32, 1, 6, 32),
     'fedisic':  (512, 32, 3, 8, 64),   # RGB generator, 8 classes
     'ham10000': (512, 32, 3, 7, 64),   # RGB generator, 7 classes
+    'cifar10':  (512, 32, 3, 10, 64),  # RGB generator, 10 CIFAR-10 classes
 }
 
 
@@ -155,6 +159,22 @@ RUNCONFIGS = {
             'unique_labels': 7,     # 7 HAM10000 (ISIC 2018 Task 3) classes
             'generative_alpha': 10,
             'generative_beta': 10,
+            'weight_decay': 1e-2
+        },
+
+    'cifar10':
+        {
+            'ensemble_lr': 3e-4,
+            'ensemble_batch_size': 128,
+            'ensemble_epochs': 50,
+            'num_pretrain_iters': 20,
+            'ensemble_alpha': 1,    # teacher loss (server side)
+            'ensemble_beta': 0,     # adversarial student loss
+            'ensemble_eta': 1,      # diversity loss
+            'unique_labels': 10,    # 10 CIFAR-10 classes
+            'generative_alpha': 10, # user regularisation
+            'generative_beta': 10,  # RGB benefits from stronger generator
+                                    # regularisation (per FedGen CIFAR settings)
             'weight_decay': 1e-2
         },
 
