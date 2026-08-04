@@ -173,6 +173,12 @@ data/HAM10000/*
 !data/HAM10000/generate_niid_dirichlet.py
 !data/HAM10000/README.md
 
+# CIFAR-10: torchvision auto-downloads the raw pool (~170 MB) into
+# data/CIFAR10/raw/. Ignore everything except the small helper scripts.
+data/CIFAR10/*
+!data/CIFAR10/generate_niid_dirichlet.py
+!data/CIFAR10/README.md
+
 results/models/
 models/
 results/
