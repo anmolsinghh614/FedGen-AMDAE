@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """
+# py run_cifar10_sweep.py --full_pipeline --device cuda --times 3 2>&1 | tee logs/cifar10_full.log
 run_cifar10_sweep.py
 ====================
 
