@@ -1,0 +1,11 @@
+python3 paper_table_cifar10.py \
+    --input-root results/cifar10 \
+    --output-dir results/cifar10/tables \
+    --metric all \
+    --imputer_ablation
+
+python3 paper_dashboard_cifar10.py \
+    --input-root results/cifar10 \
+    --output-dir results/cifar10/dashboards \
+    --headline-alpha 1.0 \
+    --headline-missing 0.10    
